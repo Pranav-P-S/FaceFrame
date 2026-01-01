@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+*.local
+
+# Tauri (legacy - project now uses Electron)
+src-tauri/
+
+# IDE and editor files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# FaceFrame data (user-specific, generated at runtime)
+.faceframe/
+
+# Python
+*.egg-info/
+*.egg
+.eggs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Misc
+*.tgz
