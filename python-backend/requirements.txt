@@ -1,7 +1,19 @@
+# Core ML/CV dependencies
 insightface>=0.7.3
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+
+# ONNX Runtime (GPU for Windows/Linux, CPU for Mac)
 onnxruntime-gpu>=1.16.0; sys_platform != 'darwin'
 onnxruntime>=1.16.0; sys_platform == 'darwin'
-numpy>=1.24.0
+
+# For clustering
 scikit-learn>=1.3.0
 faiss-cpu>=1.7.4
+
+# Image processing
 Pillow>=10.0.0
+
+# Note: PyTorch with CUDA is recommended for GPU detection display
+# Install separately with:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
