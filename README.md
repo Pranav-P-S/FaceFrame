@@ -13,10 +13,10 @@ A local, privacy-focused face detection and photo organization application. Auto
 - 🔒 **Privacy First** - Everything runs locally, your photos never leave your device
 - ⚡ **GPU Accelerated** - Uses NVIDIA CUDA for fast processing (CPU fallback available)
 
-## Screenshots
+<!--## Screenshots
 
 *Coming soon*
-
+-->
 ## Requirements
 
 - Windows 10/11
@@ -29,7 +29,7 @@ A local, privacy-focused face detection and photo organization application. Auto
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/FaceFrame.git
+git clone https://github.com/Pranav-P-S/FaceFrame.git
 cd FaceFrame
 ```
 
