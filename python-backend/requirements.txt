@@ -1,19 +1,15 @@
-# Core ML/CV dependencies
-insightface>=0.7.3
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
+# Face detection & recognition
+# Prebuilt insightface wheels exist for Python 3.10-3.12; on newer Pythons
+# pip would have to compile it from source (needs a C++ toolchain).
+insightface>=0.7.3,<0.8
 
-# ONNX Runtime (GPU for Windows/Linux, CPU for Mac)
-onnxruntime-gpu>=1.16.0; sys_platform != 'darwin'
-onnxruntime>=1.16.0; sys_platform == 'darwin'
+# CPU inference by default -- works on Windows, Linux and macOS with no
+# extra setup. See the README for optional GPU acceleration.
+onnxruntime>=1.16,<2
 
-# For clustering
-scikit-learn>=1.3.0
-faiss-cpu>=1.7.4
+numpy>=1.26,<2
+opencv-python-headless>=4.8
+Pillow>=10.0
 
-# Image processing
-Pillow>=10.0.0
-
-# Note: PyTorch with CUDA is recommended for GPU detection display
-# Install separately with:
-# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Face clustering
+scikit-learn>=1.3
