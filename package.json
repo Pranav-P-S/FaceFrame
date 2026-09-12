@@ -1,6 +1,6 @@
 {
   "name": "faceframe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local face detection and photo organization app",
   "private": true,
   "type": "module",
@@ -10,7 +10,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"wait-on http://localhost:1420 && cross-env ELECTRON_START_URL=http://localhost:1420 electron electron/main.cjs\"",
-    "electron:build": "npm run build && electron-builder"
+    "electron:build": "npm run build && electron-builder",
+    "test": "node scripts/run-backend-e2e.mjs",
+    "test:e2e": "node scripts/run-backend-e2e.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",
@@ -29,18 +31,35 @@
     "wait-on": "^9.0.3"
   },
   "build": {
-    "appId": "com.faceframe.app",
+    "appId": "app.faceframe.desktop",
     "productName": "FaceFrame",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "electron/**/*",
-      "python-backend/**/*"
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "python-backend",
+        "to": "python-backend",
+        "filter": [
+          "**/*.py",
+          "requirements.txt"
+        ]
+      }
     ],
     "win": {
       "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Graphics"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.photography"
     }
   }
 }

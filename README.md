@@ -1,116 +1,144 @@
 # FaceFrame
 
-A local, privacy-focused face detection and photo organization application. Automatically detect faces in your photos, cluster them by person, and organize your photo library.
+FaceFrame scans a folder of photos, finds the faces in them and groups them
+by person — all on your machine. Nothing is uploaded, nothing leaves the
+device, and there is no account. The whole index lives in a single hidden
+folder inside the library you choose, so removing FaceFrame from your life
+is a matter of deleting that folder.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/platform-Windows-lightgrey.svg)
 
-## Features
+## What it does
 
-- 🔍 **Face Detection** - Automatically detect faces in your photos using InsightFace
-- 👥 **Face Clustering** - Group similar faces together to identify people
-- 🖼️ **Photo Organization** - Browse your photos organized by person
-- 🔒 **Privacy First** - Everything runs locally, your photos never leave your device
-- ⚡ **GPU Accelerated** - Uses NVIDIA CUDA for fast processing (CPU fallback available)
+1. **Scan** — pick a folder. FaceFrame walks it (skipping its own metadata),
+   decodes every JPG/PNG/WebP/BMP/TIFF with correct EXIF orientation, and
+   runs detection + recognition through InsightFace's `buffalo_l` models.
+2. **Group** — one click runs DBSCAN over the face embeddings and creates a
+   card per person, with the largest detected crop as the portrait.
+3. **Organize** — click a person to see every photo they appear in, open any
+   photo full-screen, rename people, or merge two cards that should be one.
 
-<!--## Screenshots
+Re-scans are incremental: unchanged files are skipped, edited files have
+their old detections replaced, deleted files are pruned from the index.
+Re-clustering is stable — people you renamed keep their names.
 
-*Coming soon*
--->
 ## Requirements
 
-- Windows 10/11
 - Node.js 18+
-- Python 3.10+
-- NVIDIA GPU with CUDA 12.1 support (optional, for GPU acceleration)
+- Python 3.10–3.12 (3.11 recommended; newer Pythons have no prebuilt
+  insightface wheels yet)
+- Windows, Linux, or macOS
 
-## Installation
+The face models (~350 MB) are downloaded once, on the first scan, into
+`~/.insightface`. Everything after that is fully offline.
 
-### 1. Clone the repository
+## Setup
 
 ```bash
 git clone https://github.com/Pranav-P-S/FaceFrame.git
 cd FaceFrame
-```
 
-### 2. Install Node.js dependencies
-
-```bash
 npm install
-```
 
-### 3. Set up Python environment
-
-```bash
 python -m venv venv
-.\venv\Scripts\activate  # Windows
-pip install -r python-backend/requirements.txt
+# Windows:
+venv\Scripts\pip install -r python-backend\requirements.txt
+# Linux / macOS:
+venv/bin/pip install -r python-backend/requirements.txt
 ```
 
-### 4. Install PyTorch with CUDA (optional, for GPU acceleration)
+### Optional: GPU acceleration
+
+By default inference runs on CPU through ONNX Runtime, which is fine for
+ordinary photo libraries (the LFW test library scans at roughly four
+images per second on this laptop's CPU). If you have NVIDIA CUDA 12.x +
+cuDNN set up, install the GPU build of the runtime and pick GPU in the
+app's engine selector:
 
 ```bash
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+venv\Scripts\pip install onnxruntime-gpu
 ```
 
-## Usage
+If the CUDA libraries are missing at runtime, the app quietly falls back to
+CPU instead of failing.
 
-### Development Mode
+## Running
 
 ```bash
 npm run electron:dev
 ```
 
-### Build for Production
+This starts the Vite dev server and the Electron shell, which spawns the
+Python backend from `venv`. For a production bundle:
 
 ```bash
-npm run electron:build
+npm run electron:build   # installer in release/
 ```
 
-## Project Structure
+The packaged app needs Python with the backend dependencies on the target
+machine: a `venv` folder next to the app, a system Python 3.10–3.12 with
+the requirements installed, or any interpreter pointed to by the
+`FACEFRAME_PYTHON` environment variable.
 
-```
-FaceFrame/
-├── electron/           # Electron main process
-│   ├── main.cjs       # Main process entry point
-│   └── preload.cjs    # Preload script for IPC
-├── python-backend/     # Python face detection backend
-│   ├── main.py        # Backend entry point
-│   ├── processor.py   # Face detection using InsightFace
-│   ├── database.py    # SQLite database management
-│   ├── scanner.py     # Directory scanning and file processing
-│   └── clusterer.py   # Face clustering using DBSCAN
-├── src/               # React frontend
-│   ├── App.tsx        # Main application component
-│   └── components/    # React components
-└── package.json
+## Tests
+
+The backend has an end-to-end test that talks to it exactly like the
+Electron shell does — scan, cluster, rename, merge, rescan, cancel, clear:
+
+```bash
+# one-time: build a small test library from the LFW dataset (~180 MB)
+venv/Scripts/python scripts/make_test_library.py   # venv/bin/python on unix
+
+npm test
 ```
 
-## How It Works
+The clustering check requires better-than-chance grouping of the LFW
+identities; on the 6-person test library it currently scores 1.00 purity.
 
-1. **Scan**: Select a folder containing photos. FaceFrame scans for images and detects faces using InsightFace.
-2. **Index**: Detected faces are saved as thumbnails in `.faceframe/thumbnails/` and stored in a local SQLite database.
-3. **Cluster**: Click "Find People" to group similar faces using DBSCAN clustering.
-4. **Organize**: Browse your photos organized by person. Rename people and merge duplicates.
+## Project layout
 
-## Technology Stack
+```
+electron/            Electron main + preload (backend spawn, IPC, window)
+python-backend/      Face detection service (stdin/stdout JSON protocol)
+  main.py            command loop, scan orchestration
+  scanner.py         incremental directory walk, prefetching decoder
+  processor.py       InsightFace wrapper, thumbnails, hardware probe
+  clusterer.py       DBSCAN clustering with stable person ids
+  database.py        SQLite (WAL) index storage
+src/                 React UI
+scripts/             test-library builder, e2e test, window capture
+```
 
-- **Frontend**: React, TypeScript, Vite
-- **Desktop**: Electron
-- **Backend**: Python, InsightFace, ONNX Runtime
-- **Database**: SQLite, FAISS
-- **ML**: InsightFace (buffalo_l model), scikit-learn DBSCAN
+## Design notes
+
+- The Python backend is a plain subprocess speaking newline-delimited JSON
+  on stdin/stdout. Electron correlates requests by id and broadcasts events;
+  if the backend dies it is restarted a few times with growing delays
+  before the UI gives up and says so.
+- Photos are shown through IPC reads, not custom file protocols, so path
+  encoding never has to survive a URL round trip.
+- Each library gets its own `.faceframe/` (SQLite index + face thumbnails).
+  Deleting it removes every trace of FaceFrame for that library.
+- Clustering runs over all faces every time, then matches clusters back to
+  existing people by shared face count. Renamed people keep their names,
+  auto-named cards keep their ids, and empty persons are cleaned up.
+
+## Honest limitations
+
+- Detection quality follows InsightFace: strong on clear frontal faces,
+  weaker on profiles, heavy occlusion, and very small faces (under ~28 px
+  are skipped outright). Abstract wallpapers occasionally produce a
+  confident false positive — that is the detector, not a bug in the loop.
+- Faces with no cluster stay visible under "Unsorted faces" rather than
+  being hidden; they will be picked up the next time clustering runs.
+- The packaged build does not bundle Python. That keeps the installer small
+  and the setup honest, but it does mean the venv step is not optional.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Issues and pull requests are welcome. If you touch the backend, run
+`npm test` — the e2e suite covers the whole command surface.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [InsightFace](https://github.com/deepinsight/insightface) for face detection and recognition
-- [ONNX Runtime](https://onnxruntime.ai/) for model inference
-- [Electron](https://www.electronjs.org/) for cross-platform desktop support
+MIT — see [LICENSE](LICENSE).

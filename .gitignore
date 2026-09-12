@@ -41,6 +41,12 @@ lerna-debug.log*
 # FaceFrame data (user-specific, generated at runtime)
 .faceframe/
 
+# Test dataset and generated libraries (fetched by scripts/make_test_library.py)
+test-data/
+
+# Packaging output
+release/
+
 # Python
 *.egg-info/
 *.egg
