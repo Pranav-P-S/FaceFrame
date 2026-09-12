@@ -1,285 +1,528 @@
-import { useState, useEffect } from "react";
-import "./App.css";
+import { useCallback, useEffect, useRef, useState } from 'react';
+import './App.css';
 
-import PeopleList from './components/PeopleList';
-import UnclusteredFaces from './components/UnclusteredFaces';
+import {
+  api,
+  BackendEvent,
+  ComputeInfo,
+  Face,
+  Person,
+} from './types';
+import { folderName } from './images';
 
-interface AppState {
-  status: "init" | "ready" | "scanning" | "error";
-  folderPath: string | null;
+import Dialog from './components/Dialog';
+import ImageViewer from './components/ImageViewer';
+import PeopleGrid from './components/PeopleGrid';
+import PersonDetail from './components/PersonDetail';
+import UnclusteredStrip from './components/UnclusteredStrip';
+import WelcomeScreen from './components/WelcomeScreen';
+
+type BackendState = 'checking' | 'starting' | 'ready' | 'restarting' | 'unavailable';
+
+interface ScanState {
+  current: number;
+  total: number;
+  file: string;
+  modelLoading: boolean;
 }
 
-// Extend window interface for Electron API
-declare global {
-  interface Window {
-    electronAPI: {
-      selectFolder: () => Promise<string | null>;
-      scanDirectory: (path: string, provider: string) => Promise<any>;
-      cancelScan: () => Promise<any>;
-      clusterFaces: (path: string) => Promise<any>;
-      getPersons: (path: string) => Promise<any>;
-      getUnclusteredFaces: (path: string) => Promise<any>;
-      clearIndex: (path: string) => Promise<any>;
-      renamePerson: (path: string, personId: number, newName: string) => Promise<any>;
-      mergePersons: (path: string, keepId: number, mergeId: number) => Promise<any>;
-      getProviders: () => Promise<void>;
-      onBackendMessage: (callback: (data: any) => void) => void;
-    };
-  }
+interface DialogSpec {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  danger: boolean;
+  action: () => void;
 }
 
-const PROVIDER_NAMES: Record<string, string> = {
-  'CPUExecutionProvider': 'CPU (Standard)',
-  'CUDAExecutionProvider': 'NVIDIA GPU (CUDA)',
-  'TensorrtExecutionProvider': 'NVIDIA TensorRT',
-  'OpenVINOExecutionProvider': 'Intel OpenVINO',
-  'DmlExecutionProvider': 'DirectML (Windows)',
-};
+const FOLDER_KEY = 'faceframe.folder';
 
-function App() {
-  const [state, setState] = useState<AppState>({ status: "ready", folderPath: null });
-  const [providers, setProviders] = useState<string[]>([]);
-  const [providerLabels, setProviderLabels] = useState<Record<string, string>>({});
-  const [selectedProvider, setSelectedProvider] = useState<string>("CPUExecutionProvider");
-  const [progress, setProgress] = useState<{ current: number, total: number, file: string } | null>(null);
+export default function App() {
+  const [backend, setBackend] = useState<BackendState>('checking');
+  const [backendReason, setBackendReason] = useState<string | null>(null);
+  const [folder, setFolder] = useState<string | null>(() =>
+    localStorage.getItem(FOLDER_KEY)
+  );
+  const [scan, setScan] = useState<ScanState | null>(null);
+  const [clustering, setClustering] = useState(false);
+  const [persons, setPersons] = useState<Person[]>([]);
+  const [unclustered, setUnclustered] = useState<Face[]>([]);
+  const [detail, setDetail] = useState<{ person: Person } | null>(null);
+  const [detailPhotos, setDetailPhotos] = useState<
+    { path: string; face_count: number }[] | null
+  >(null);
+  const [viewer, setViewer] = useState<{ images: string[]; index: number } | null>(
+    null
+  );
+  const [dialog, setDialog] = useState<DialogSpec | null>(null);
+  const [toast, setToast] = useState<{ text: string; kind: 'info' | 'error' } | null>(
+    null
+  );
+  const [compute, setCompute] = useState<ComputeInfo | null>(null);
+  const [provider, setProvider] = useState<string>('auto');
 
-  const [persons, setPersons] = useState<any[]>([]);
-  const [unclustered, setUnclustered] = useState<any[]>([]);
-  const [viewerImage, setViewerImage] = useState<string | null>(null);
+  const folderRef = useRef(folder);
+  folderRef.current = folder;
 
-  const fetchDisplayData = (path: string) => {
-    window.electronAPI.getPersons(path);
-    window.electronAPI.getUnclusteredFaces(path);
-  };
+  const toastTimer = useRef<number | null>(null);
 
-  useEffect(() => {
-    // Listen for backend messages via Electron bridge
-    if (window.electronAPI) {
-      window.electronAPI.onBackendMessage((data: any) => {
+  const showToast = useCallback((text: string, kind: 'info' | 'error' = 'info') => {
+    setToast({ text, kind });
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(
+      () => setToast(null),
+      kind === 'error' ? 8000 : 4000
+    );
+  }, []);
 
-        if (data.status === 'providers') {
-          setProviders(data.providers);
-
-          // Build label map with actual GPU name if available
-          const labels: Record<string, string> = { ...PROVIDER_NAMES };
-          if (data.gpu_info?.cuda_available && data.gpu_info?.gpu_name) {
-            labels['CUDAExecutionProvider'] = data.gpu_info.gpu_name;
-          }
-          // Filter out TensorRT if not truly available
-          const filteredProviders = data.providers.filter((p: string) => {
-            if (p === 'TensorrtExecutionProvider' && !data.gpu_info?.cuda_available) return false;
-            return true;
-          });
-          setProviders(filteredProviders);
-          setProviderLabels(labels);
-
-          // Auto-select CUDA if available
-          const cuda = filteredProviders.find((p: string) => p.includes('CUDA'));
-          if (cuda) setSelectedProvider(cuda);
-          else if (filteredProviders.length > 0) setSelectedProvider(filteredProviders[0]);
-        }
-        if (data.status === 'progress') {
-          setProgress({
-            current: data.current || 0,
-            total: data.total || 0,
-            file: data.file || 'Unknown'
-          });
-        }
-        if (data.status === 'complete' || data.status === 'error' || data.status === 'cancelled') {
-          setState(s => ({ ...s, status: "ready" }));
-          setProgress(null);
-          if (state.folderPath) fetchDisplayData(state.folderPath);
-        }
-        if (data.status === 'persons') {
-          console.log('Received persons:', data.data);
-          setPersons(data.data);
-        }
-        if (data.status === 'unclustered') {
-          console.log('Received unclustered faces:', data.data?.length, 'Sample:', data.data?.[0]);
-          setUnclustered(data.data);
-        }
-        if (data.status === 'clustered' || data.status === 'index_cleared') {
-          if (state.folderPath) fetchDisplayData(state.folderPath);
-        }
-      });
-
-      // Fetch providers on mount
-      setTimeout(() => {
-        window.electronAPI.getProviders().catch(e => console.error(e));
-      }, 1000);
-    }
-  }, [state.folderPath]);
-
-  const handleSelectFolder = async () => {
+  const refreshLibrary = useCallback(async (target?: string) => {
+    const path = target ?? folderRef.current;
+    if (!path) return;
     try {
-      if (!window.electronAPI) {
-        console.error("Electron API not found");
-        return;
-      }
-      const path = await window.electronAPI.selectFolder();
-      if (path) {
-        console.log("Selected folder:", path);
-        setState(s => ({ ...s, folderPath: path, status: "scanning" }));
+      const [personsRes, facesRes] = await Promise.all([
+        api().getPersons(path),
+        api().getUnclusteredFaces(path),
+      ]);
+      setPersons(personsRes.persons ?? []);
+      setUnclustered(facesRes.faces ?? []);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Could not read the index', 'error');
+    }
+  }, [showToast]);
 
-        // Trigger scan
-        await window.electronAPI.scanDirectory(path, selectedProvider);
+  const startScan = useCallback(async (path: string, providerChoice: string) => {
+    setFolder(path);
+    localStorage.setItem(FOLDER_KEY, path);
+    setDetail(null);
+    setViewer(null);
+    setPersons([]);
+    setUnclustered([]);
+    setScan({ current: 0, total: 0, file: '', modelLoading: true });
+    try {
+      await api().scanDirectory(path, providerChoice);
+    } catch (e) {
+      setScan(null);
+      showToast(e instanceof Error ? e.message : 'Could not start the scan', 'error');
+    }
+  }, [showToast]);
+
+  // One-time wiring: backend status + event stream.
+  useEffect(() => {
+    api().onBackendStatus((status) => {
+      if (status.state === 'ready') {
+        setBackend('ready');
+        setBackendReason(null);
+        const saved = localStorage.getItem(FOLDER_KEY);
+        if (saved) refreshLibrary(saved);
+      } else if (status.state === 'unavailable') {
+        // A dead backend can never deliver a scan or clustering verdict;
+        // drop any in-flight spinners so the UI does not lock up.
+        setBackend('unavailable');
+        setBackendReason(status.reason ?? null);
+        setScan(null);
+        setClustering(false);
+      } else if (status.state === 'restarting') {
+        setBackend('restarting');
+        setScan(null);
+        setClustering(false);
+      } else {
+        setBackend('starting');
       }
-    } catch (err) {
-      console.error("Error selecting folder:", err);
+    });
+
+    api().onBackendEvent((event: BackendEvent) => {
+      switch (event.event) {
+        case 'model_status':
+          setScan((s) => (s ? { ...s, modelLoading: event.state === 'loading' } : s));
+          break;
+        case 'scan_started':
+          setScan((s) => (s ? { ...s, modelLoading: false } : s));
+          break;
+        case 'scan_progress':
+          setScan({
+            current: event.current,
+            total: event.total,
+            file: event.file,
+            modelLoading: false,
+          });
+          break;
+        case 'scan_complete':
+          setScan(null);
+          refreshLibrary(event.path);
+          if (event.processed === 0) {
+            showToast('No readable images were found in that folder');
+          } else if (event.faces === 0) {
+            showToast(
+              `Checked ${event.processed} ${event.processed === 1 ? 'file' : 'files'} — no new faces`
+            );
+          } else {
+            showToast(
+              `Scanned ${event.processed} ${event.processed === 1 ? 'file' : 'files'}, found ${event.faces} ${event.faces === 1 ? 'face' : 'faces'}`
+            );
+          }
+          break;
+        case 'scan_cancelled':
+          setScan(null);
+          refreshLibrary(event.path);
+          showToast('Scan cancelled');
+          break;
+        case 'scan_error':
+          setScan(null);
+          showToast(event.message, 'error');
+          break;
+        case 'cluster_done': {
+          setClustering(false);
+          refreshLibrary();
+          const { people, unclustered: left } = event;
+          showToast(
+            left > 0
+              ? `Found ${people} ${people === 1 ? 'person' : 'people'} (${left} ${left === 1 ? 'face' : 'faces'} still unsorted)`
+              : `Found ${people} ${people === 1 ? 'person' : 'people'}`
+          );
+          break;
+        }
+        case 'index_cleared':
+          setPersons([]);
+          setUnclustered([]);
+          setDetail(null);
+          setViewer(null);
+          showToast('Index cleared');
+          break;
+      }
+    });
+
+    api()
+      .backendState()
+      .then((state) => {
+        if (state.state === 'ready') {
+          setBackend('ready');
+          const saved = localStorage.getItem(FOLDER_KEY);
+          if (saved) refreshLibrary(saved);
+        } else if (state.state === 'unavailable') {
+          setBackend('unavailable');
+          setBackendReason(state.reason ?? null);
+        } else {
+          setBackend('starting');
+        }
+      })
+      .catch(() => setBackend('unavailable'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Hardware options, once the backend is up.
+  useEffect(() => {
+    if (backend !== 'ready') return;
+    api()
+      .getProviders()
+      .then((res) => setCompute(res.compute))
+      .catch(() => setCompute(null));
+  }, [backend]);
+
+  const openPerson = (person: Person) => {
+    setDetail({ person });
+    setDetailPhotos(null);
+    api()
+      .getPhotosByPerson(folder ?? '', person.id)
+      .then((res) => setDetailPhotos(res.photos))
+      .catch(() => {
+        setDetailPhotos([]);
+        showToast('Could not load photos for this person', 'error');
+      });
+  };
+
+  const handleRename = async (person: Person, name: string) => {
+    if (!folder) return;
+    try {
+      await api().renamePerson(folder, person.id, name);
+      refreshLibrary();
+      if (detail?.person.id === person.id) setDetail({ ...detail, person: { ...person, name } });
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Rename failed', 'error');
     }
   };
 
-  const handleCancelScan = async () => {
-    await window.electronAPI.cancelScan();
+  const handleMerge = (keep: Person, merge: Person) => {
+    setDialog({
+      title: 'Merge people?',
+      body: `Move every face of “${merge.name}” into “${keep.name}”. “${merge.name}” is removed. This cannot be undone.`,
+      confirmLabel: 'Merge',
+      danger: true,
+      action: () => {
+        api()
+          .mergePersons(folder ?? '', keep.id, merge.id)
+          .then(() => refreshLibrary())
+          .catch((e) =>
+            showToast(e instanceof Error ? e.message : 'Merge failed', 'error')
+          );
+      },
+    });
   };
 
-  const handleClearIndex = async () => {
-    if (state.folderPath) {
-      if (confirm("Are you sure you want to delete all indexing data? This cannot be undone.")) {
-        await window.electronAPI.clearIndex(state.folderPath);
-        setPersons([]);
-        setUnclustered([]);
-      }
+  const handleFindPeople = async () => {
+    if (!folder || clustering) return;
+    setClustering(true);
+    try {
+      await api().clusterFaces(folder);
+    } catch (e) {
+      setClustering(false);
+      showToast(e instanceof Error ? e.message : 'Could not group faces', 'error');
     }
   };
 
-  const handleCluster = async () => {
-    if (state.folderPath) {
-      console.log("Clustering...");
-      await window.electronAPI.clusterFaces(state.folderPath);
-    }
+  const retryBackend = () => {
+    setBackend('starting');
+    api()
+      .retryBackend()
+      .catch(() => setBackend('unavailable'));
   };
+
+  const handleClearIndex = () => {
+    if (!folder) return;
+    setDialog({
+      title: 'Clear the index?',
+      body: 'Deletes the .faceframe folder inside the library: all detected faces, people and thumbnails for this folder. Your photos are not touched.',
+      confirmLabel: 'Delete index',
+      danger: true,
+      action: () => {
+        api()
+          .clearIndex(folder)
+          .catch((e) =>
+            showToast(e instanceof Error ? e.message : 'Clearing failed', 'error')
+          );
+      },
+    });
+  };
+
+  const handleCancelScan = () => {
+    api().cancelScan().catch(() => setScan(null));
+  };
+
+  const pickAndScanFolder = () => {
+    api()
+      .selectFolder()
+      .then((p) => {
+        if (p) startScan(p, provider);
+      });
+  };
+
+  const busy = scan !== null || clustering || backend !== 'ready';
+
+  const providerOptions = [
+    { value: 'auto', label: 'Auto' },
+    { value: 'cpu', label: 'CPU' },
+    ...(compute?.cuda_listed ? [{ value: 'cuda', label: 'GPU (CUDA)' }] : []),
+  ];
 
   return (
-    <div className="app-container" style={{ width: '100vw', height: '100vh', overflowY: 'auto', background: '#1e1e1e', color: '#eee' }}>
-      {/* Header Section */}
-      <div style={{ padding: '20px', background: '#252525', borderBottom: '1px solid #333', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <h1 style={{ margin: 0, fontSize: '24px' }}>FaceFrame</h1>
-
-          <button className="primary" onClick={handleSelectFolder} disabled={state.status === 'scanning'}>
-            {state.folderPath ? "Scan New Folder" : "Select Folder to Scan"}
-          </button>
-
-          {state.folderPath && state.status !== 'scanning' && (
-            <button className="danger" onClick={handleClearIndex} style={{ background: '#d32f2f', color: 'white', border: 'none', padding: '8px 12px', borderRadius: '4px', cursor: 'pointer' }}>
-              Clear Index
-            </button>
-          )}
+    <div className="app">
+      <header className="titlebar">
+        <div className="titlebar-brand" onClick={() => setDetail(null)} role="presentation">
+          <img src="/icon.svg" alt="" className="brand-icon" />
+          <span className="brand-name">FaceFrame</span>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-          {/* Hardware Select */}
-          <select
-            value={selectedProvider}
-            onChange={(e) => setSelectedProvider(e.target.value)}
-            disabled={state.status === 'scanning'}
-            style={{ padding: '8px', borderRadius: '4px', background: '#333', color: 'white', border: '1px solid #555', maxWidth: '200px' }}
+        {folder && (
+          <button
+            className="folder-chip"
+            onClick={() => {
+              if (!scan) pickAndScanFolder();
+            }}
+            title={folder}
+            disabled={scan !== null}
           >
-            {providers.length === 0 && <option>Loading Hardware...</option>}
-            {providers.map(p => <option key={p} value={p}>{providerLabels[p] || PROVIDER_NAMES[p] || p}</option>)}
-          </select>
+            <span className="folder-icon" aria-hidden>▸</span>
+            {folderName(folder)}
+          </button>
+        )}
 
-          {/* Cluster Button (Only if ready and has data) */}
-          {state.status === 'ready' && state.folderPath && unclustered.length > 0 && (
+        <div className="titlebar-spacer" />
+
+        {folder && backend === 'ready' && (
+          <>
+            <label className="provider-label" title="Where face detection runs">
+              <span>Engine</span>
+              <select
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                disabled={scan !== null}
+              >
+                {providerOptions.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.value === 'auto' && compute ? `${o.label} · ${compute.device_label}` : o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
-              className="secondary"
-              onClick={handleCluster}
-              style={{ padding: '8px 16px', borderRadius: '4px', cursor: 'pointer', background: '#2196F3', color: 'white', border: 'none' }}
+              className="btn"
+              disabled={scan !== null}
+              onClick={pickAndScanFolder}
             >
-              Find People ({unclustered.length})
+              Scan folder
             </button>
-          )}
-        </div>
-      </div>
+            <button className="btn btn-danger-ghost" disabled={scan !== null} onClick={handleClearIndex}>
+              Clear index
+            </button>
+          </>
+        )}
+      </header>
 
-      {/* Progress Bar & Cancel */}
-      {state.status === 'scanning' && progress && (
-        <div style={{ padding: '20px', background: '#222', borderBottom: '1px solid #444', display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ marginBottom: '5px', display: 'flex', justifyContent: 'space-between', fontSize: '14px' }}>
-              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '400px' }}>Scanning: {progress.file}</span>
-              <span style={{ fontFamily: 'monospace' }}>{progress.current} / {progress.total}</span>
+      {scan && (
+        <div className="scanbar">
+          {scan.modelLoading && scan.total === 0 ? (
+            <div className="scanbar-info">
+              <span className="spinner spinner-inline" />
+              Preparing the face model — the first run downloads it (~350 MB)
+              and may take a few minutes.
             </div>
-            <div style={{ width: '100%', height: '8px', background: '#444', borderRadius: '4px', overflow: 'hidden' }}>
-              <div style={{
-                width: `${(progress.total > 0 ? (progress.current / progress.total) : 0) * 100}%`,
-                height: '100%',
-                background: '#4CAF50',
-                borderRadius: '4px',
-                transition: 'width 0.3s ease-out'
-              }}
-              />
+          ) : (
+            <div className="scanbar-progress">
+              <div className="scanbar-text">
+                <span className="scanbar-file" title={scan.file}>
+                  {scan.file || 'Scanning…'}
+                </span>
+                <span className="scanbar-count">
+                  {scan.current} / {scan.total}
+                </span>
+              </div>
+              <div className="scanbar-track">
+                <div
+                  className="scanbar-fill"
+                  style={{
+                    width: scan.total ? `${(scan.current / scan.total) * 100}%` : '0%',
+                  }}
+                />
+              </div>
             </div>
-          </div>
-          <button onClick={handleCancelScan} style={{ padding: '8px 16px', color: 'white', background: '#d32f2f', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+          )}
+          <button className="btn" onClick={handleCancelScan}>
             Cancel
           </button>
         </div>
       )}
 
-      {/* Main Content */}
-      {!state.folderPath ? (
-        <div style={{ padding: '40px', textAlign: 'center', color: '#888' }}>
-          <h2>Welcome to FaceFrame</h2>
-          <p>Select a folder to start organizing your photos securely.</p>
-        </div>
-      ) : (
-        <div>
-          {/* 1. People Clusters */}
-          <PeopleList
-            persons={persons}
-            folderPath={state.folderPath || ''}
-            onRefresh={() => state.folderPath && fetchDisplayData(state.folderPath)}
-          />
+      {backend === 'restarting' && (
+        <div className="notice">Restarting the photo engine…</div>
+      )}
 
-          {/* 2. Unclustered Faces */}
-          <UnclusteredFaces
-            faces={unclustered}
-            onFaceClick={(face) => {
-              // Open full image in viewer
-              if (face.file_path) {
-                const url = 'safe-file://' + face.file_path.replace(/\\/g, '/');
-                console.log('Opening image:', url);
-                setViewerImage(url);
-              }
-            }}
-          />
+      {folder && backend !== 'ready' && backend !== 'restarting' && (
+        <div className="notice notice-warning">
+          {backend === 'unavailable' ? (
+            <>
+              <span>
+                {backendReason === 'python-not-found'
+                  ? 'Python was not found, so face detection cannot run. Install Python 3.10+ and the venv (see the README), then try again.'
+                  : 'The photo engine is not running.'}
+              </span>
+              <button className="btn btn-small" onClick={retryBackend}>
+                Try again
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="spinner spinner-inline" /> Starting the photo engine…
+            </>
+          )}
         </div>
       )}
 
-      {/* Image Viewer Modal */}
-      {viewerImage && (
-        <div
-          onClick={() => setViewerImage(null)}
-          onKeyDown={(e) => e.key === 'Escape' && setViewerImage(null)}
-          tabIndex={0}
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0,0,0,0.9)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            cursor: 'pointer'
-          }}
-        >
-          <img
-            src={viewerImage}
-            style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain' }}
-            onClick={(e) => e.stopPropagation()}
+      <main className="content">
+        {!folder ? (
+          <WelcomeScreen
+            backendUnavailable={backend === 'unavailable'}
+            backendReason={backendReason}
+            onSelectFolder={pickAndScanFolder}
           />
-          <div style={{ position: 'absolute', top: '20px', right: '20px', color: 'white', fontSize: '14px' }}>
-            Press ESC or click to close
-          </div>
+        ) : (
+          <>
+            {detail ? (
+              <PersonDetail
+                person={detail.person}
+                photos={detailPhotos}
+                onBack={() => setDetail(null)}
+                onOpenPhoto={(path) => {
+                  const paths = (detailPhotos ?? []).map((p) => p.path);
+                  setViewer({ images: paths.length ? paths : [path], index: Math.max(0, paths.indexOf(path)) });
+                }}
+              />
+            ) : (
+              <>
+                <PeopleGrid
+                  persons={persons}
+                  busy={busy}
+                  onOpenPerson={openPerson}
+                  onRename={handleRename}
+                  onMerge={handleMerge}
+                />
+                <UnclusteredStrip
+                  faces={unclustered}
+                  clustering={clustering}
+                  onFindPeople={handleFindPeople}
+                  onOpenFace={(face) =>
+                    setViewer({ images: [face.file_path], index: 0 })
+                  }
+                />
+                {!scan && persons.length === 0 && unclustered.length === 0 && (
+                  <div className="empty-state">
+                    {clustering ? (
+                      <p className="empty-hint">
+                        <span className="spinner" /> Finding people…
+                      </p>
+                    ) : backend !== 'ready' ? (
+                      <p className="empty-hint">
+                        <span className="spinner" /> Loading library…
+                      </p>
+                    ) : (
+                      <>
+                        <h2>No faces indexed here yet</h2>
+                        <p className="empty-hint">
+                          Scan this folder to detect faces, or choose another
+                          folder from the top bar.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                )}
+                {scan && persons.length === 0 && unclustered.length === 0 && (
+                  <div className="empty-state">
+                    <p className="empty-hint">
+                      <span className="spinner" /> Detecting faces…
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </main>
+
+      {viewer && (
+        <ImageViewer
+          images={viewer.images}
+          index={viewer.index}
+          onNavigate={(index) => setViewer((v) => (v ? { ...v, index } : v))}
+          onClose={() => setViewer(null)}
+        />
+      )}
+
+      {dialog && (
+        <Dialog
+          title={dialog.title}
+          body={dialog.body}
+          confirmLabel={dialog.confirmLabel}
+          danger={dialog.danger}
+          onConfirm={() => {
+            dialog.action();
+            setDialog(null);
+          }}
+          onCancel={() => setDialog(null)}
+        />
+      )}
+
+      {toast && (
+        <div className={`toast toast-${toast.kind}`} role="status" aria-live="polite">
+          {toast.text}
         </div>
       )}
     </div>
   );
 }
-
-export default App;
