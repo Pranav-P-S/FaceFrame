@@ -95,6 +95,7 @@ class Store:
         edit=...,
         date_override=...,
         favorite=...,
+        archived=...,
         locked=...,
     ):
         """Update user-owned columns; sentinel ``...`` means leave unchanged."""
@@ -103,6 +104,7 @@ class Store:
             "edit": edit,
             "date_override": date_override,
             "favorite": favorite,
+            "archived": archived,
             "locked": locked,
         }
         sets, vals = [], []
@@ -250,10 +252,11 @@ class Store:
             ]
 
     def mark_missing(self, seen_paths: set) -> int:
-        """Flag indexed files not seen in this pass; never auto-delete."""
+        """Flag indexed files not seen in this pass; never auto-delete.
+        Creations live inside .faceframe (outside the walk) by design."""
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT path, missing FROM files WHERE missing=0"
+                "SELECT path, missing FROM files WHERE missing=0 AND kind != 'creation'"
             ).fetchall()
             gone = [r["path"] for r in rows if r["path"] not in seen_paths]
             conn.executemany(
@@ -279,6 +282,11 @@ class Store:
             else:
                 rows = []
                 for path in changed_paths:
+                    old = conn.execute(
+                        "SELECT rowid FROM fts_map WHERE path=?", (path,)
+                    ).fetchone()
+                    if old:
+                        conn.execute("DELETE FROM media_fts WHERE rowid=?", (old[0],))
                     conn.execute("DELETE FROM fts_map WHERE path=?", (path,))
                     row = conn.execute(
                         """SELECT f.path, f.content_hash, m.caption, m.labels

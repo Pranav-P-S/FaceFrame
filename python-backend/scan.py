@@ -42,9 +42,10 @@ class ScanPipeline:
         labeler=None,
         emit=None,
     ):
-        self.store = Store(db_path, library_root=library_root)
         self.root = str(Path(library_root).resolve())
         self.data_dir = Path(self.root) / DATA_DIR_NAME
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.store = Store(db_path, library_root=library_root)
         self.face_engine = face_engine
         self.labeler = labeler
         self.emit = emit or (lambda event, **payload: None)

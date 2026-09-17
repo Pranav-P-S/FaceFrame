@@ -13,3 +13,9 @@ Pillow>=10.0
 
 # Face clustering
 scikit-learn>=1.3
+
+# Deletes always go to the OS Recycle Bin, never rm
+send2trash>=1.8
+
+# Test fixtures write EXIF; also a fallback reader
+piexif>=1.1

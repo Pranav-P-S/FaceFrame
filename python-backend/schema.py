@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS media (
     edit TEXT,                                -- JSON editor params
     date_override REAL,                       -- user-corrected capture time
     favorite INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
     locked INTEGER NOT NULL DEFAULT 0,
     poster_path TEXT,                         -- relative cache path
     analysis_state TEXT NOT NULL DEFAULT 'none',  -- none|hashed|analyzed
