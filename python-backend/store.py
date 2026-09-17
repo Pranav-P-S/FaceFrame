@@ -351,6 +351,185 @@ class Store:
                 ],
             )
 
+    # -- persons / faces (v3) ---------------------------------------------
+
+    def all_faces_for_clustering(self):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT id, content_hash, embedding, bbox, person_id,
+                          thumbnail_path
+                   FROM faces"""
+            ).fetchall()
+
+    def faces_by_ids(self, face_ids: list):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT id, bbox, thumbnail_path FROM faces
+                   WHERE id IN (%s)""" % ",".join("?" for _ in face_ids),
+                face_ids,
+            ).fetchall()
+
+    def person_face_ids(self, person_id: int) -> list:
+        with self.connect() as conn:
+            return [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM faces WHERE person_id=?", (person_id,)
+                )
+            ]
+
+    def set_faces_person(self, face_ids: list, person_id: int | None):
+        if not face_ids:
+            return
+        with self.connect() as conn:
+            conn.executemany(
+                "UPDATE faces SET person_id=? WHERE id=?",
+                [(person_id, fid) for fid in face_ids],
+            )
+
+    def persons_with_counts(self, include_hidden: bool = False) -> list:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT p.id, p.name, p.thumbnail_path, p.hidden,
+                          COUNT(f.id) AS face_count
+                   FROM persons p
+                   JOIN faces f ON f.person_id = p.id
+                   GROUP BY p.id
+                   ORDER BY face_count DESC, p.id"""
+            ).fetchall()
+        return [
+            dict(r)
+            for r in rows
+            if include_hidden or not r["hidden"]
+        ]
+
+    def get_person(self, person_id: int):
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT p.id, p.name, p.thumbnail_path, p.hidden,
+                          COUNT(f.id) AS face_count
+                   FROM persons p LEFT JOIN faces f ON f.person_id = p.id
+                   WHERE p.id=? GROUP BY p.id""",
+                (person_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def person_names(self):
+        with self.connect() as conn:
+            return conn.execute("SELECT id, name FROM persons").fetchall()
+
+    def create_person(self, name: str | None = None) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO persons (name, created_at) VALUES (?, ?)",
+                (name, time.time()),
+            )
+            return cur.lastrowid
+
+    def rename_person(self, person_id: int, name: str):
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE persons SET name=? WHERE id=?", (name, person_id)
+            )
+
+    def set_person_hidden(self, person_id: int, hidden: bool):
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE persons SET hidden=? WHERE id=?",
+                (1 if hidden else 0, person_id),
+            )
+
+    def update_person_thumbnail(self, person_id: int, thumbnail_path: str):
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE persons SET thumbnail_path=? WHERE id=?",
+                (thumbnail_path, person_id),
+            )
+
+    def merge_persons(self, keep_id: int, merge_id: int):
+        """Faces move to keep_id, merge_id is removed. Returns the removed
+        person's thumbnail path (regenerable cache data) for cleanup."""
+        with self.connect() as conn:
+            stale = conn.execute(
+                "SELECT thumbnail_path FROM persons WHERE id=?", (merge_id,)
+            ).fetchone()
+            keep = conn.execute(
+                "SELECT thumbnail_path FROM persons WHERE id=?", (keep_id,)
+            ).fetchone()
+            conn.execute(
+                "UPDATE faces SET person_id=? WHERE person_id=?",
+                (keep_id, merge_id),
+            )
+            conn.execute("DELETE FROM persons WHERE id=?", (merge_id,))
+        stale_path = stale[0] if stale else None
+        keep_path = keep[0] if keep else None
+        return stale_path if stale_path and stale_path != keep_path else None
+
+    def delete_empty_persons(self) -> int:
+        with self.connect() as conn:
+            cur = conn.execute(
+                """DELETE FROM persons
+                   WHERE id NOT IN
+                     (SELECT DISTINCT person_id FROM faces
+                      WHERE person_id IS NOT NULL)"""
+            )
+            return cur.rowcount
+
+    def person_photos(self, person_id: int) -> list:
+        """Distinct visible images containing this person, newest first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT f.path, f.content_hash, COUNT(fa.id) AS face_count,
+                          COALESCE(m.date_override, m.capture_time) AS ts
+                   FROM faces fa
+                   JOIN files f ON f.content_hash = fa.content_hash
+                   JOIN media m ON m.content_hash = fa.content_hash
+                   WHERE fa.person_id = ?
+                     AND f.missing=0 AND f.trashed_at IS NULL
+                   GROUP BY f.path
+                   ORDER BY ts DESC""",
+                (person_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def person_faces(self, person_id: int) -> list:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT fa.id, fa.content_hash, fa.bbox, fa.thumbnail_path
+                   FROM faces fa
+                   WHERE fa.person_id=?
+                   ORDER BY fa.id""",
+                (person_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def unclustered_faces(self, limit: int = 500) -> list:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT fa.id, fa.content_hash, fa.bbox, fa.thumbnail_path,
+                          f.path AS file_path
+                   FROM faces fa
+                   LEFT JOIN files f ON f.content_hash = fa.content_hash
+                   WHERE fa.person_id IS NULL
+                   ORDER BY fa.id
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def next_auto_person_name(self) -> str:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT name FROM persons WHERE name GLOB 'Person [0-9]*'"
+            ).fetchall()
+        highest = 0
+        for (name,) in rows:
+            try:
+                highest = max(highest, int(name.split()[-1]))
+            except ValueError:
+                continue
+        return f"Person {highest + 1}"
+
     # -- duplicates --------------------------------------------------------
 
     def duplicate_groups(self, min_count: int = 2):

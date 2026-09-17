@@ -98,7 +98,12 @@ class LibraryService:
 
     # ---------------------------------------------------------------- trash
 
-    def set_trashed(self, content_hashes: list, trashed: bool, paths: list | None = None):
+    def set_trashed(
+        self,
+        content_hashes: list | None = None,
+        trashed: bool = True,
+        paths: list | None = None,
+    ):
         """Trash/restore by content hash, or by file paths when given."""
         stamp = time.time() if trashed else None
         with self.store.connect() as conn:
