@@ -71,12 +71,13 @@ class FaceProcessor:
             return []
         return self.process_decoded(image_path, img)
 
-    def process_decoded(self, image_path: str, img: np.ndarray):
+    def process_decoded(self, image_path: str, img: np.ndarray, face_key: str | None = None):
         """Same as process_image, for callers that already decoded the file.
 
         Returns None when detection itself failed (caller should retry the
         file on a later scan); an empty list means the image simply has no
-        faces.
+        faces. ``face_key`` names thumbnails by content hash instead of path,
+        so moves/renames never orphan or duplicate face crops.
         """
         try:
             faces = self.app.get(img)
@@ -105,7 +106,9 @@ class FaceProcessor:
                     "embedding": np.asarray(embedding, dtype=np.float32).tolist(),
                     "bbox": [x1, y1, x2, y2],
                     "det_score": float(face.det_score),
-                    "thumbnail": self._save_thumbnail(image_path, idx, face_crop),
+                    "thumbnail": self._save_thumbnail(
+                        face_key if face_key else image_path, idx, face_crop
+                    ),
                 }
             )
 
@@ -115,14 +118,17 @@ class FaceProcessor:
             )
         return results
 
-    def _save_thumbnail(self, image_path: str, idx: int, face_crop: np.ndarray):
+    def _save_thumbnail(self, key: str, idx: int, face_crop: np.ndarray):
         if not self.thumbnail_dir or face_crop.size == 0:
             return None
         digest = hashlib.sha1(
-            f"{os.path.abspath(image_path)}#{idx}".encode("utf-8", "surrogateescape")
-        ).hexdigest()[:16]
+            f"{key}#{idx}".encode("utf-8", "surrogateescape")
+        ).hexdigest()[:64]
         thumb_path = os.path.join(self.thumbnail_dir, f"{digest}.jpg")
         try:
+            # The dir is normally created by the pipeline; a stale index
+            # cleared underneath us must not lose the face over it.
+            os.makedirs(self.thumbnail_dir, exist_ok=True)
             thumb = cv2.resize(
                 face_crop,
                 (THUMBNAIL_SIZE, THUMBNAIL_SIZE),
@@ -130,7 +136,7 @@ class FaceProcessor:
             )
             return _write_jpeg(thumb_path, thumb, quality=88)
         except Exception as e:
-            logger.warning("Thumbnail save failed for %s: %s", image_path, e)
+            logger.warning("Thumbnail save failed for %s: %s", key, e)
             return None
 
     @staticmethod

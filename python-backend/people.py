@@ -5,6 +5,10 @@ full DBSCAN per run, then clusters matched back to existing persons by shared
 face count so renamed people keep their identities. Faces are keyed by
 content hash now, so a re-cluster only ever needs the stored embeddings —
 no re-inference, and assignments survive file moves automatically.
+
+DBSCAN/sklearn is imported at module scope on purpose: the backend imports
+this module on its main thread at startup, and loading scipy's extension
+DLLs from a worker thread deadlocks on Windows (see main._warm_heavy_imports).
 """
 
 import json
@@ -13,6 +17,7 @@ import re
 import time
 
 import numpy as np
+from sklearn.cluster import DBSCAN
 
 logger = logging.getLogger("FaceFrame.People")
 
@@ -28,8 +33,6 @@ class PeopleService:
     # ------------------------------------------------------------ clustering
 
     def cluster(self, eps: float = EPS, min_samples: int = MIN_SAMPLES) -> dict:
-        from sklearn.cluster import DBSCAN
-
         rows = self.store.all_faces_for_clustering()
         face_ids, valid_rows, embeddings, previous = [], [], [], {}
         for row in rows:

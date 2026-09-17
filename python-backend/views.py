@@ -51,7 +51,7 @@ def _base_items(
                COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
                m.favorite, m.archived, m.locked, m.caption, m.poster_path,
-               m.phash, m.exif, m.flags
+               m.flags
         FROM files f JOIN media m ON m.content_hash = f.content_hash
         WHERE f.missing=0 AND f.trashed_at IS NULL
     """
@@ -122,7 +122,7 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
                COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
                m.favorite, m.archived, m.locked, m.caption, m.poster_path,
-               m.phash, m.exif, m.flags
+               m.flags
         FROM files f JOIN media m ON m.content_hash = f.content_hash
         WHERE f.missing=0
     """

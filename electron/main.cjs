@@ -3,6 +3,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const fs = require('fs');
+const { Readable } = require('stream');
 
 let mainWindow = null;
 let pythonProcess = null;
@@ -32,10 +33,17 @@ const isDev = !!process.env.ELECTRON_START_URL;
 // scheme gives the bundle a real origin for CSP and fetch.
 const APP_SCHEME = 'app';
 const APP_ORIGIN = 'app://bundle';
+// media:// streams originals (videos) to the renderer with HTTP range
+// support; it is restricted to registered library roots.
+const MEDIA_SCHEME = 'media';
 protocol.registerSchemesAsPrivileged([
   {
     scheme: APP_SCHEME,
     privileges: { standard: true, secure: true, supportFetchAPI: true },
+  },
+  {
+    scheme: MEDIA_SCHEME,
+    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true },
   },
 ]);
 
@@ -56,6 +64,84 @@ function registerAppProtocol() {
       return new Response('Not found', { status: 404 });
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// media:// — range-capable streaming of originals for <video>
+// ---------------------------------------------------------------------------
+
+const mediaRoots = new Set();
+
+const MEDIA_MIME = {
+  '.mp4': 'video/mp4',
+  '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.wmv': 'video/x-ms-wmv',
+  '.3gp': 'video/3gpp',
+  '.gif': 'image/gif',
+};
+
+function registerMediaProtocol() {
+  protocol.handle(MEDIA_SCHEME, (request) => {
+    try {
+      const url = new URL(request.url);
+      const requested = path.normalize(
+        decodeURIComponent(url.searchParams.get('path') || '')
+      );
+      const underRoot = [...mediaRoots].some((root) =>
+        requested.toLowerCase().startsWith(path.normalize(root).toLowerCase())
+      );
+      const allowed =
+        underRoot && !requested.toLowerCase().includes('.faceframe');
+      if (!allowed) {
+        return new Response('Forbidden', { status: 403 });
+      }
+      const mime =
+        MEDIA_MIME[path.extname(requested).toLowerCase()] || 'application/octet-stream';
+      const stat = fs.statSync(requested);
+      const range = request.headers.Range || request.headers.range;
+      if (range) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        if (match) {
+          const start = match[1] ? parseInt(match[1], 10) : 0;
+          const end = match[2] ? Math.min(parseInt(match[2], 10), stat.size - 1) : stat.size - 1;
+          if (start >= stat.size || start > end) {
+            return new Response(null, {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${stat.size}` },
+            });
+          }
+          return new Response(Readable.toWeb(fs.createReadStream(requested, { start, end })), {
+            status: 206,
+            headers: {
+              'Content-Type': mime,
+              'Content-Length': String(end - start + 1),
+              'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+              'Accept-Ranges': 'bytes',
+            },
+          });
+        }
+      }
+      return new Response(Readable.toWeb(fs.createReadStream(requested)), {
+        status: 200,
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': String(stat.size),
+          'Accept-Ranges': 'bytes',
+        },
+      });
+    } catch (e) {
+      console.error('media:// request failed:', e);
+      return new Response('Not found', { status: 404 });
+    }
+  });
+}
+
+function addMediaRoot(folder) {
+  if (folder) mediaRoots.add(path.normalize(folder));
 }
 
 // ---------------------------------------------------------------------------
@@ -341,13 +427,31 @@ function registerIpc() {
       : result.filePaths[0];
   });
 
+  // Every action that names a library folder also registers it as a media
+  // root, so media:// only ever streams indexed libraries.
+  const noteRoot = (message) => {
+    const folder = message.path || message.folder;
+    if (typeof folder === 'string' && folder) addMediaRoot(folder);
+  };
+
   const passThrough = (channel, mapArgs) =>
     ipcMain.handle(channel, (_event, ...args) => {
       requireBackend();
       const message = mapArgs(...args);
       message.id = nextRequestId++;
+      noteRoot(message);
       return sendToPython(message);
     });
+
+  // Generic surface: request('action', params). Kept alongside the named
+  // channels so older call sites keep working.
+  ipcMain.handle('backend-request', (_event, action, params) => {
+    requireBackend();
+    const message = { action, ...(params || {}) };
+    message.id = nextRequestId++;
+    noteRoot(message);
+    return sendToPython(message);
+  });
 
   passThrough('get-providers', () => ({ action: 'get_providers' }));
   passThrough('scan-directory', (folder, provider) => ({
@@ -380,6 +484,7 @@ function registerIpc() {
     merge_id: mergeId,
   }));
   passThrough('clear-index', (folder) => ({ action: 'clear_index', path: folder }));
+  passThrough('open-library', (folder) => ({ action: 'open_library', path: folder }));
 
   ipcMain.handle('backend-state', () => lastBackendStatus);
 
@@ -477,6 +582,7 @@ if (!gotLock) {
 
   app.whenReady().then(() => {
     if (!isDev) registerAppProtocol();
+    registerMediaProtocol();
     registerIpc();
     createWindow();
     startPythonBackend();

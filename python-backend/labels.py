@@ -113,6 +113,18 @@ def _softmax(values: np.ndarray) -> np.ndarray:
     return exp / exp.sum()
 
 
+def model_ready(cache_dir: str | None = None) -> bool:
+    """True when the model files are already on disk (no download implied)."""
+    cache = Path(
+        cache_dir
+        or os.environ.get("FACEFRAME_MODELS", str(Path.home() / ".cache" / "faceframe"))
+    )
+    return (
+        (cache / "mobilenetv2-12.onnx").is_file()
+        and (cache / "imagenet_classes.txt").is_file()
+    )
+
+
 def _ensure_model(model_path: Path, classes_path: Path, timeout: int = 90):
     for path, url in ((model_path, MODEL_URL), (classes_path, CLASSES_URL)):
         if path.is_file() and path.stat().st_size > 0:
