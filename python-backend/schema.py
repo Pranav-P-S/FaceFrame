@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS media (
     exif TEXT,                                -- JSON camera/lens/gps blob
     phash TEXT,                               -- 16 hex chars, photos
     labels TEXT,                              -- JSON array of strings
+    flags TEXT,                               -- JSON {screenshot,panorama,motion,motion_pair}
     caption TEXT,
     edit TEXT,                                -- JSON editor params
     date_override REAL,                       -- user-corrected capture time

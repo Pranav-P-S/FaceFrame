@@ -1,0 +1,259 @@
+"""View layer: the feed (day/month/year groupings) and search execution.
+
+Every query anchors on ``files`` — an item appears at most once per view.
+Item visibility rules, in one place: not trashed, not missing, not locked
+(unless the session unlocked), archived excluded from the main feed but
+includable, motion-pair videos hidden behind their photo.
+"""
+
+import calendar
+import json
+import time
+
+import query as query_mod
+
+
+# --------------------------------------------------------------------- feed
+
+def feed_groups(
+    store,
+    view: str = "days",
+    include_locked: bool = False,
+    include_archived: bool = False,
+    favorite: bool | None = None,
+) -> list:
+    items = _base_items(
+        store,
+        include_locked=include_locked,
+        include_archived=include_archived,
+        favorite=favorite,
+    )
+    keyfn = {"days": _day_key, "months": _month_key, "years": _year_key}[view]
+    groups: dict[str, list] = {}
+    for item in items:
+        groups.setdefault(keyfn(item["ts"]), []).append(item)
+    return [
+        {"key": key, "items": members}
+        for key, members in sorted(groups.items(), reverse=True)
+    ]
+
+
+def _base_items(
+    store,
+    include_locked: bool = False,
+    include_archived: bool = False,
+    favorite: bool | None = None,
+    extra_where: str = "",
+    extra_params: tuple = (),
+) -> list:
+    sql = """
+        SELECT f.path, f.content_hash, f.kind, f.added_at,
+               COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
+               m.kind AS media_kind, m.width, m.height, m.duration,
+               m.favorite, m.archived, m.locked, m.caption, m.poster_path,
+               m.phash, m.exif, m.flags
+        FROM files f JOIN media m ON m.content_hash = f.content_hash
+        WHERE f.missing=0 AND f.trashed_at IS NULL
+    """
+    params: list = []
+    if not include_locked:
+        sql += " AND COALESCE(m.locked,0)=0"
+    if not include_archived:
+        sql += " AND COALESCE(m.archived,0)=0"
+    if favorite is not None:
+        sql += " AND m.favorite=?"
+        params.append(1 if favorite else 0)
+    sql += _motion_pair_filter()
+    sql += extra_where
+    sql += " ORDER BY ts DESC, f.path"
+    with store.connect() as conn:
+        rows = conn.execute(sql, (*params, *extra_params)).fetchall()
+    items = [dict(r) for r in rows]
+    for item in items:
+        item["flags"] = _flags(item.get("flags"))
+    return items
+
+
+def _motion_pair_filter() -> str:
+    return (
+        " AND NOT (m.kind='video' AND m.flags IS NOT NULL"
+        " AND m.flags LIKE '%motion_pair%')"
+    )
+
+
+def _flags(raw):
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _day_key(ts: float) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+
+
+def _month_key(ts: float) -> str:
+    return time.strftime("%Y-%m", time.gmtime(ts))
+
+
+def _year_key(ts: float) -> str:
+    return time.strftime("%Y", time.gmtime(ts))
+
+
+# ------------------------------------------------------------------- search
+
+def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
+    parsed = query_mod.parse(raw_query)
+    where, params = [], []
+
+    text_hashes = None
+    if parsed.text:
+        text_hashes = {
+            hit["content_hash"] for hit in store.search_text(" ".join(parsed.text))
+        }
+        if not text_hashes:
+            return {"items": [], "total": 0, "filters": parsed.filters}
+
+    include_trashed = "trashed" in parsed.get("is")
+    base_sql = """
+        SELECT f.path, f.content_hash, f.kind,
+               COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
+               m.kind AS media_kind, m.width, m.height, m.duration,
+               m.favorite, m.archived, m.locked, m.caption, m.poster_path,
+               m.phash, m.exif, m.flags
+        FROM files f JOIN media m ON m.content_hash = f.content_hash
+        WHERE f.missing=0
+    """
+    if include_trashed:
+        base_sql += " AND f.trashed_at IS NOT NULL"
+    else:
+        base_sql += " AND f.trashed_at IS NULL"
+    if not include_locked and "locked" not in parsed.get("is"):
+        base_sql += " AND COALESCE(m.locked,0)=0"
+
+    for value in parsed.get("is"):
+        if value == "favorite":
+            where.append("m.favorite=1")
+        elif value == "archived":
+            where.append("COALESCE(m.archived,0)=1")
+        elif value == "locked":
+            where.append("COALESCE(m.locked,0)=1")
+        elif value in ("screenshot", "panorama"):
+            where.append("m.flags LIKE ?")
+            params.append(f'%"{value}"%')
+        elif value == "video":
+            where.append("m.kind='video'")
+        elif value == "photo":
+            where.append("m.kind='photo'")
+
+    for value in parsed.get("type"):
+        if value in ("photo", "video"):
+            where.append("m.kind=?", )
+            params.append(value)
+        else:
+            where.append("m.flags LIKE ?")
+            params.append(f'%"{value}"%')
+
+    for value in parsed.get("person"):
+        where.append(
+            """EXISTS (SELECT 1 FROM faces fa JOIN persons p ON p.id=fa.person_id
+                       WHERE fa.content_hash=f.content_hash AND p.name=?)"""
+        )
+        params.append(value)
+
+    for value in parsed.get("place"):
+        where.append(
+            """EXISTS (SELECT 1 FROM geonames g
+                       WHERE m.exif LIKE '%' || ? || '%')"""
+        )
+        params.append(value)
+
+    for value in parsed.get("folder"):
+        where.append("f.path LIKE ?")
+        params.append(f"{value.strip('/').replace(chr(92), '/')}%")
+
+    for value in parsed.get("after"):
+        epoch = _date_to_epoch(value, start=True)
+        if epoch is not None:
+            where.append("COALESCE(m.date_override, m.capture_time) >= ?")
+            params.append(epoch)
+
+    for value in parsed.get("before"):
+        epoch = _date_to_epoch(value, start=False)
+        if epoch is not None:
+            where.append("COALESCE(m.date_override, m.capture_time) < ?")
+            params.append(epoch)
+
+    sql = base_sql
+    for clause in where:
+        sql += f" AND {clause}"
+    sql += _motion_pair_filter()
+    if text_hashes is not None:
+        sql += f" AND f.content_hash IN ({','.join('?' * len(text_hashes))})"
+        params.extend(text_hashes)
+    sql += " ORDER BY ts DESC, f.path LIMIT 5000"
+
+    with store.connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    items = [dict(r) for r in rows]
+    for item in items:
+        item["flags"] = _flags(item.get("flags"))
+    return {"items": items, "total": len(items), "filters": parsed.filters}
+
+
+def _date_to_epoch(value: str, start: bool):
+    value = value.strip()
+    for fmt, length in (("%Y-%m-%d", 10), ("%Y-%m", 7), ("%Y", 4)):
+        if len(value) >= length:
+            try:
+                struct = time.strptime(value[:length], fmt)
+                epoch = calendar.timegm(struct)
+                return epoch
+            except ValueError:
+                continue
+    return None
+
+
+def item_detail(store, path: str):
+    with store.connect() as conn:
+        file_row = conn.execute(
+            """SELECT path, content_hash, kind, size, mtime, added_at,
+                      missing, trashed_at
+               FROM files WHERE path=?""",
+            (path,),
+        ).fetchone()
+        if not file_row:
+            return None
+        media_row = conn.execute(
+            """SELECT *,
+                      COALESCE(date_override, capture_time, ?) AS ts
+               FROM media WHERE content_hash=?""",
+            (file_row["mtime"], file_row["content_hash"]),
+        ).fetchone()
+        faces = conn.execute(
+            """SELECT fa.id, fa.bbox, fa.person_id, fa.thumbnail_path,
+                      p.name AS person_name
+               FROM faces fa LEFT JOIN persons p ON p.id=fa.person_id
+               WHERE fa.content_hash=?""",
+            (file_row["content_hash"],),
+        ).fetchall()
+        albums = conn.execute(
+            """SELECT a.id, a.name FROM albums a
+               JOIN album_items ai ON ai.album_id=a.id
+               WHERE ai.content_hash=?""",
+            (file_row["content_hash"],),
+        ).fetchall()
+        duplicate_paths = conn.execute(
+            """SELECT path FROM files
+               WHERE content_hash=? AND path != ? AND missing=0
+                 AND trashed_at IS NULL""",
+            (file_row["content_hash"], path),
+        ).fetchall()
+    detail = dict(file_row)
+    detail["media"] = dict(media_row) if media_row else None
+    detail["faces"] = [dict(f) for f in faces]
+    detail["albums"] = [dict(a) for a in albums]
+    detail["duplicate_paths"] = [d["path"] for d in duplicate_paths]
+    return detail

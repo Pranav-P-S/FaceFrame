@@ -16,8 +16,6 @@ committed, so a crash mid-pass always self-heals on the next pass.
 
 import logging
 import os
-import queue
-import threading
 import time
 from pathlib import Path
 
@@ -138,6 +136,7 @@ class ScanPipeline:
             return self._cancelled(stats)
 
         stats["missing_now"] = self._mark_missing(seen_paths)
+        self._link_motion_pairs(seen_paths)
         self.store.prune_orphan_media()
         stats["gc_removed"] = self.gc_caches()
         self.store.sync_fts()
@@ -199,6 +198,7 @@ class ScanPipeline:
             from hashing import perceptual_hash
 
             meta["phash"] = perceptual_hash(img)
+            meta["flags"] = _dumps(_photo_flags(rel_path, width, height))
             exif_info = exif_extract(abs_path)
             meta["capture_time"] = (
                 exif_info["capture_time"] if exif_info["capture_time"] is not None
@@ -305,6 +305,45 @@ class ScanPipeline:
     def _mark_missing(self, seen_paths: set) -> int:
         return self.store.mark_missing(seen_paths)
 
+    def _link_motion_pairs(self, seen_paths: set):
+        """Motion photos: a video sharing a photo's basename (IMG_0123.jpg +
+        IMG_0123.mp4). The photo grows a ``motion`` flag pointing at the
+        video; the video is marked ``motion_pair`` so the feed shows the pair
+        once, with a play affordance on the photo — never as two items."""
+        photo_stems: dict[str, str] = {}
+        video_by_stem: dict[str, str] = {}
+        for rel_path in seen_paths:
+            suffix = Path(rel_path).suffix.lower()
+            stem = Path(rel_path).stem.lower()
+            if suffix in IMAGE_EXTENSIONS and suffix not in (".gif",):
+                photo_stems.setdefault(stem, rel_path)
+            elif suffix in VIDEO_EXTENSIONS:
+                video_by_stem.setdefault(stem, rel_path)
+        for stem, video_rel in video_by_stem.items():
+            photo_rel = photo_stems.get(stem)
+            if not photo_rel:
+                continue
+            self._merge_flag(photo_rel, {"motion": video_rel})
+            self._merge_flag(video_rel, {"motion_pair": photo_rel})
+
+    def _merge_flag(self, rel_path: str, extra: dict):
+        state = self.store.get_file_state(rel_path)
+        if not state or not state["content_hash"]:
+            return
+        media = self.store.get_media(state["content_hash"])
+        if not media:
+            return
+        try:
+            flags = json_loads(media["flags"]) if media["flags"] else {}
+        except Exception:
+            flags = {}
+        if all(flags.get(k) == v for k, v in extra.items()):
+            return
+        flags.update(extra)
+        self.store.upsert_media(
+            {"content_hash": media["content_hash"], "flags": _dumps(flags)}
+        )
+
     # ------------------------------------------------------------------ gc
 
     def gc_caches(self) -> int:
@@ -379,10 +418,29 @@ def _now() -> float:
     return time.time()
 
 
+def _photo_flags(rel_path: str, width, height) -> dict:
+    """Cheap type flags derivable at scan time (screenshots, panoramas)."""
+    import re
+
+    flags = {}
+    stem = Path(rel_path).stem
+    if re.search(r"screenshot|screen[_ ]?shot|screen[\s_-]?recording", stem, re.I):
+        flags["screenshot"] = 1
+    if width and height and max(width, height) / max(1, min(width, height)) >= 2.5:
+        flags["panorama"] = 1
+    return flags
+
+
 def _dumps(value) -> str:
     import json
 
     return value if isinstance(value, str) else json.dumps(value)
+
+
+def json_loads(value):
+    import json
+
+    return json.loads(value)
 
 
 def _unlink(path: Path):

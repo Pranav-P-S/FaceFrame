@@ -20,7 +20,8 @@ logger = logging.getLogger("FaceFrame.Store")
 # rescan can never clobber it.
 MEDIA_SCAN_FIELDS = (
     "kind", "width", "height", "duration", "capture_time", "tz_offset",
-    "exif", "phash", "labels", "poster_path", "analysis_state", "analyzed_at",
+    "exif", "phash", "labels", "flags", "poster_path", "analysis_state",
+    "analyzed_at",
 )
 
 
