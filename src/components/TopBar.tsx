@@ -1,0 +1,227 @@
+import { useEffect, useRef, useState } from 'react';
+import { useStore } from '../lib/store';
+import { backend } from '../lib/api';
+import { api } from '../types';
+import { folderName } from '../images';
+
+/** Top bar: search box, density slider, theme + app menu; flips into a
+ * selection action bar while items are selected. */
+
+function ScanBar() {
+  const scan = useStore((s) => s.scan);
+  if (!scan) return null;
+  const pct = scan.total ? (scan.current / scan.total) * 100 : 0;
+  return (
+    <div className="scanbar" role="status">
+      {scan.modelLoading && scan.total === 0 ? (
+        <div className="scanbar-info">
+          <span className="spinner spinner-inline" />
+          Preparing the photo models — the first run downloads them and may take a few minutes.
+        </div>
+      ) : (
+        <div className="scanbar-progress">
+          <div className="scanbar-text">
+            <span className="scanbar-file" title={scan.file}>{scan.file || 'Scanning…'}</span>
+            <span className="scanbar-count">{scan.current} / {scan.total}</span>
+          </div>
+          <div className="scanbar-track"><div className="scanbar-fill" style={{ width: `${pct}%` }} /></div>
+        </div>
+      )}
+      <button className="btn btn-small" onClick={() => api().cancelScan().catch(() => undefined)}>
+        Cancel
+      </button>
+    </div>
+  );
+}
+
+export default function TopBar() {
+  const route = useStore((s) => s.route);
+  const theme = useStore((s) => s.theme);
+  const setTheme = useStore((s) => s.setTheme);
+  const density = useStore((s) => s.density);
+  const setDensity = useStore((s) => s.setDensity);
+  const selection = useStore((s) => s.selection);
+  const clearSelection = useStore((s) => s.clearSelection);
+  const navigate = useStore((s) => s.navigate);
+  const libraryPath = useStore((s) => s.libraryPath);
+
+  const [query, setQuery] = useState(route.page === 'search' ? route.query : '');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const lastRoute = useRef(route);
+
+  useEffect(() => {
+    if (lastRoute.current !== route) {
+      lastRoute.current = route;
+      if (route.page !== 'search') setQuery('');
+    }
+  }, [route]);
+
+  const submitSearch = (q: string) => {
+    navigate({ page: 'search', query: q });
+  };
+
+  if (selection.size > 0) {
+    return <SelectionBar count={selection.size} onDone={clearSelection} />;
+  }
+
+  return (
+    <header className="topbar">
+      <button className="brand" onClick={() => navigate({ page: 'photos' })}>
+        <img src="/icon.svg" alt="" className="brand-icon" />
+        <span className="brand-name">Photos</span>
+        {libraryPath && <span className="brand-library" title={libraryPath}>{folderName(libraryPath)}</span>}
+      </button>
+
+      <form
+        className="searchbox"
+        role="search"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submitSearch(query);
+        }}
+      >
+        <span className="searchbox-icon" aria-hidden>⌕</span>
+        <input
+          ref={inputRef}
+          id="global-search"
+          data-search-input
+          type="search"
+          placeholder="Search people, places, things, dates…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submitSearch(query);
+          }}
+        />
+      </form>
+
+      <div className="topbar-spacer" />
+
+      {route.page === 'photos' && (
+        <label className="density" title="Grid density">
+          <input
+            type="range"
+            min={0}
+            max={3}
+            step={1}
+            value={density}
+            onChange={(e) => setDensity(Number(e.target.value))}
+          />
+        </label>
+      )}
+
+      <button
+        className="icon-btn"
+        title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+        onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+      >
+        {theme === 'light' ? '◐' : '◑'}
+      </button>
+
+      <div className="app-menu-wrap">
+        <button className="avatar" aria-label="App menu" onClick={() => setMenuOpen((v) => !v)}>
+          FF
+        </button>
+        {menuOpen && (
+          <div className="app-menu" onMouseLeave={() => setMenuOpen(false)}>
+            <button
+              onClick={() => {
+                setMenuOpen(false);
+                navigate({ page: 'settings' });
+              }}
+            >
+              Settings
+            </button>
+            <button
+              onClick={() => {
+                setMenuOpen(false);
+                void backend.getStorageStats();
+              }}
+            >
+              Storage
+            </button>
+            <div className="app-menu-note">Fully local. No account, no cloud.</div>
+          </div>
+        )}
+      </div>
+      <ScanBar />
+    </header>
+  );
+}
+
+function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) {
+  const selection = useStore((s) => s.selection);
+  const showToast = useStore((s) => s.showToast);
+  const libraryPath = useStore((s) => s.libraryPath);
+
+  const hashes = async (): Promise<string[]> => {
+    const details = await Promise.all(
+      [...selection].map((path) => backend.getItem(path))
+    );
+    return details
+      .map((d) => (d.item as { media?: { content_hash?: string } } | undefined)?.media?.content_hash)
+      .filter((h): h is string => Boolean(h));
+  };
+
+  const withUndo = (text: string, undo: () => Promise<unknown>) => {
+    showToast({ text, kind: 'info', actionLabel: 'Undo', action: undo });
+  };
+
+  return (
+    <header className="topbar topbar-select">
+      <button className="icon-btn" onClick={onDone} aria-label="Clear selection">✕</button>
+      <span className="select-count">{count} selected</span>
+      <div className="topbar-spacer" />
+      <button
+        className="btn-ghost"
+        onClick={async () => {
+          const hs = await hashes();
+          await backend.setFavorite(hs, true);
+          withUndo('Added to favorites', () => backend.setFavorite(hs, false));
+          onDone();
+        }}
+      >
+        Favorite
+      </button>
+      <button
+        className="btn-ghost"
+        onClick={async () => {
+          const hs = await hashes();
+          await backend.setArchived(hs, true);
+          withUndo('Archived', () => backend.setArchived(hs, false));
+          onDone();
+        }}
+      >
+        Archive
+      </button>
+      <button
+        className="btn-ghost"
+        onClick={async () => {
+          const hs = await hashes();
+          const albumName = window.prompt('Add to album — create new or pick an existing name:');
+          if (!albumName) return;
+          const created = await backend.createAlbum(albumName);
+          const albumId = Number(created.album_id);
+          await backend.albumAdd(albumId, hs);
+          showToast({ text: `Added to “${albumName}”`, kind: 'info' });
+          onDone();
+        }}
+      >
+        Add to album
+      </button>
+      <button
+        className="btn-ghost btn-danger-ghost"
+        onClick={async () => {
+          const hs = await hashes();
+          await backend.setTrashed(hs, true);
+          withUndo('Moved to trash', () => backend.setTrashed(hs, false));
+          onDone();
+          void libraryPath;
+        }}
+      >
+        Trash
+      </button>
+    </header>
+  );
+}

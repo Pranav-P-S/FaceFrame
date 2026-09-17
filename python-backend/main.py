@@ -721,15 +721,16 @@ def _get_image_preview(req):
         raise ValueError("File is not part of an indexed library")
     rel = pathio.to_relative(file_path, ctx["root"])
 
-    edit = None
-    state = ctx["store"].get_file_state(rel)
-    if state and state["content_hash"]:
-        media = ctx["store"].get_media(state["content_hash"])
-        if media and media["edit"]:
-            try:
-                edit = json.loads(media["edit"])
-            except ValueError:
-                edit = None
+    edit = req.get("edit")
+    if edit is None:
+        state = ctx["store"].get_file_state(rel)
+        if state and state["content_hash"]:
+            media = ctx["store"].get_media(state["content_hash"])
+            if media and media["edit"]:
+                try:
+                    edit = json.loads(media["edit"])
+                except ValueError:
+                    edit = None
     out = render_preview(
         ctx["store"], ctx["root"], rel,
         max_dim=max_dim,

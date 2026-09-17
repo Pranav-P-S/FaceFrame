@@ -1,22 +1,19 @@
-// Types mirroring the Python backend's JSON responses.
+// Types mirroring the Python backend's JSON responses (v3 protocol).
 
 export interface Person {
   id: number;
   name: string;
   thumbnail: string | null;
   face_count: number;
+  hidden?: number;
 }
 
 export interface Face {
   id: number;
-  file_path: string;
+  content_hash?: string;
+  file_path?: string | null;
   bbox: [number, number, number, number];
   thumbnail: string | null;
-}
-
-export interface PhotoEntry {
-  path: string;
-  face_count: number;
 }
 
 export interface ComputeInfo {
@@ -30,38 +27,165 @@ export interface BackendStatus {
   reason?: string;
 }
 
-export interface ScanProgress {
+export type MediaKind = 'photo' | 'video';
+
+/** Lean item shape used by feeds/search/albums. Paths are absolute. */
+export interface Item {
+  path: string;
+  content_hash: string;
+  kind: string; // photo | video | creation
+  added_at?: number;
+  ts: number;
+  media_kind?: MediaKind;
+  width?: number | null;
+  height?: number | null;
+  duration?: number | null;
+  favorite?: number;
+  archived?: number;
+  locked?: number;
+  caption?: string | null;
+  poster_path?: string | null;
+  flags?: Record<string, unknown>;
+}
+
+export interface FeedGroup {
+  key: string;
+  items: Item[];
+}
+
+export interface MediaInfo {
+  content_hash: string;
+  kind: MediaKind;
+  width: number | null;
+  height: number | null;
+  duration: number | null;
+  capture_time: number | null;
+  tz_offset: string | null;
+  exif: string | null;
+  phash: string | null;
+  labels: string | null;
+  flags: string | null;
+  caption: string | null;
+  edit: string | null;
+  date_override: number | null;
+  favorite: number;
+  archived: number;
+  locked: number;
+  poster_path: string | null;
+}
+
+export interface ItemDetail {
+  path: string;
+  content_hash: string;
+  kind: string;
+  size: number;
+  mtime: number;
+  added_at: number;
+  missing: number;
+  trashed_at: number | null;
+  media: MediaInfo | null;
+  faces: { id: number; bbox: string; person_id: number | null; thumbnail_path: string | null; person_name: string | null }[];
+  albums: { id: number; name: string }[];
+  duplicate_paths: string[];
+  ts: number;
+}
+
+export interface AlbumSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  cover_hash: string | null;
+  cover: string | null;
+  sort_key: string;
+  created_at: number;
+  count: number;
+}
+
+export interface AlbumDetail extends AlbumSummary {
+  items: Item[];
+}
+
+export interface PlaceGroup {
+  geohash: string;
+  count: number;
+  items: string[];
+  cover_hash: string;
+  cover: string | null;
+  lat: number;
+  lon: number;
+  name: string | null;
+}
+
+export interface MemoryGroup {
+  type: 'on_this_day' | 'trip' | 'highlights';
+  title: string;
+  items: Item[];
+  cover_hash: string;
+  cover: string | null;
+  years_ago?: number;
+  date?: string;
+  place?: string;
+  start?: number;
+  end?: number;
+}
+
+export interface LibraryInfo {
+  path: string;
+  items: number;
+  missing: number;
+  lock_set: boolean;
+  labels_enabled: boolean;
+  labels_ready: boolean;
+  watch_enabled: boolean;
+}
+
+export interface StorageStats {
+  items: { count: number; bytes: number };
+  index_bytes: number;
+  caches: Record<string, number>;
+}
+
+export interface ScanState {
   current: number;
   total: number;
   file: string;
+  hashing?: boolean;
+  modelLoading: boolean;
 }
 
 export type BackendEvent =
   | { event: 'model_status'; state: 'loading' | 'ready' }
-  | { event: 'scan_started'; path: string }
-  | { event: 'scan_progress'; current: number; total: number; file: string }
-  | { event: 'scan_complete'; path: string; processed: number; faces: number }
+  | { event: 'scan_started'; path: string; total: number }
+  | { event: 'scan_progress'; processed: number; total: number; file: string; hashing?: boolean }
+  | { event: 'scan_complete'; path: string; processed: number; faces: number; [k: string]: unknown }
   | { event: 'scan_cancelled'; path: string }
   | { event: 'scan_error'; message: string }
   | { event: 'cluster_done'; people: number; new_people: number; assigned: number; unclustered: number }
   | { event: 'index_cleared'; path: string };
 
-// Declared by the Electron preload script.
+/** Declared by the Electron preload script (or the dev mock). */
 export interface FaceFrameApi {
   selectFolder(): Promise<string | null>;
+  request(action: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
+  mediaUrl(filePath: string): string;
+
   getProviders(): Promise<{ compute: ComputeInfo }>;
   scanDirectory(path: string, provider: string): Promise<unknown>;
   cancelScan(): Promise<unknown>;
   clusterFaces(path: string): Promise<{ people: number }>;
+  openLibrary(path: string): Promise<{ library: LibraryInfo }>;
+
   getPersons(path: string): Promise<{ persons: Person[] }>;
   getUnclusteredFaces(path: string): Promise<{ faces: Face[] }>;
-  getPhotosByPerson(path: string, personId: number): Promise<{ photos: PhotoEntry[] }>;
+  getPhotosByPerson(path: string, personId: number): Promise<{ photos: { path: string; face_count: number }[] }>;
   renamePerson(path: string, personId: number, newName: string): Promise<unknown>;
   mergePersons(path: string, keepId: number, mergeId: number): Promise<unknown>;
   clearIndex(path: string): Promise<unknown>;
+
   backendState(): Promise<BackendStatus & { state: string; reason?: string }>;
   retryBackend(): Promise<{ state: string }>;
   readImageDataUrl(path: string, maxDim?: number): Promise<string | null>;
+
   onBackendEvent(callback: (event: BackendEvent) => void): void;
   onBackendStatus(callback: (status: BackendStatus) => void): void;
 }
