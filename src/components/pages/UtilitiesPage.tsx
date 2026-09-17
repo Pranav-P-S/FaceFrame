@@ -31,11 +31,11 @@ export default function UtilitiesPage() {
         {stats && (
           <>
             <div className="storage-row">
-              <span>{stats.items.count} items</span>
-              <span>{formatBytes(stats.items.bytes)}</span>
+              <strong>Library total — {stats.items.count} items</strong>
+              <strong>{formatBytes(stats.items.bytes)}</strong>
             </div>
             <div className="storage-row info-muted">
-              <span>Index</span>
+              <span>FaceFrame index</span>
               <span>{formatBytes(stats.index_bytes)}</span>
             </div>
             {Object.entries(stats.caches).map(([name, bytes]) => (

@@ -112,6 +112,8 @@ def test_delete_from_disk_uses_os_trash(svc, monkeypatch):
     library, root, hashes = svc
     sent = []
     monkeypatch.setattr("library.send2trash", lambda p: sent.append(p))
+    # Security contract: only trashed, indexed files may be deleted from disk.
+    library.set_trashed(paths=["p2.jpg"], trashed=True)
     library.delete_from_disk(["p2.jpg"])
     assert sent and sent[0].endswith("p2.jpg")
     assert (root / "p2.jpg").exists()
@@ -119,6 +121,18 @@ def test_delete_from_disk_uses_os_trash(svc, monkeypatch):
         assert conn.execute(
             "SELECT COUNT(*) FROM files WHERE path='p2.jpg'"
         ).fetchone()[0] == 0
+
+
+def test_delete_from_disk_refuses_untrashed_paths(svc, monkeypatch):
+    library, root, hashes = svc
+    sent = []
+    monkeypatch.setattr("library.send2trash", lambda p: sent.append(p))
+    library.delete_from_disk(["p3.jpg"])  # indexed but not trashed
+    assert sent == []
+    with pytest.raises(ValueError):
+        library.delete_from_disk(["../../outside.jpg"])  # path escape refused
+    with pytest.raises(ValueError):
+        library.delete_from_disk([str(root.parent / "elsewhere.jpg")])  # absolute outside
 
 
 # ---------------------------------------------------------------------------

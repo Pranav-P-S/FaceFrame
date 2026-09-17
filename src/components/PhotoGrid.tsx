@@ -116,6 +116,15 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
     () => groups.flatMap((g) => g.items.map((i) => i.path)),
     [groups]
   );
+  const flatItems = useMemo(
+    () => groups.flatMap((g) => g.items),
+    [groups]
+  );
+  const flatIndexByPath = useMemo(() => {
+    const m = new Map<string, number>();
+    flatItems.forEach((item, i) => m.set(item.path, i));
+    return m;
+  }, [flatItems]);
 
   return (
     <div className="grid-scroll" ref={containerRef} onScroll={onScroll}>
@@ -133,7 +142,7 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
             <div key={`r-${i}`} className="grid-row" style={{ top: row.y, height: row.height }}>
               {row.items?.map((item, j) => {
                 const pos = row.positions?.[j];
-                const flatIndex = flatPaths.indexOf(item.path);
+                const flatIndex = flatIndexByPath.get(item.path) ?? -1;
                 return (
                   <div key={item.path} style={{ position: 'absolute', left: pos?.x, width: pos?.width, height: row.height }}>
                     <Thumb
@@ -141,7 +150,7 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
                       height={row.height}
                       selected={selection.has(item.path)}
                       selectMode={selectMode}
-                      onOpen={() => onOpen(row.items ?? [item], j)}
+                      onOpen={() => onOpen(flatItems, flatIndex)}
                       onSelect={(shift) =>
                         shift && flatIndex >= 0
                           ? selectRange(flatPaths, item.path)

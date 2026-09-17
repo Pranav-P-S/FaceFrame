@@ -83,9 +83,8 @@ export function ArchivePage() {
   const refreshToken = useStore((s) => s.refreshToken);
   const [groups, setGroups] = useState<{ key: string; items: Item[] }[]>([]);
   useEffect(() => {
-    void backend.getFeed({ view: 'days', include_archived: true }).then((res) => {
-      const all = (res.groups as { key: string; items: Item[] }[]) ?? [];
-      setGroups(all.map((g) => ({ ...g, items: g.items.filter((i) => i.archived) })).filter((g) => g.items.length));
+    void backend.getFeed({ view: 'days', archived_only: true }).then((res) => {
+      setGroups((res.groups as { key: string; items: Item[] }[]) ?? []);
     });
   }, [refreshToken]);
   return (
@@ -136,7 +135,7 @@ export function LockedPage() {
               autoFocus
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder="Passcode (mock: 1234)"
+              placeholder="Passcode"
             />
             <button className="btn" type="submit">Unlock</button>
           </form>

@@ -190,10 +190,14 @@ function seed(): void {
   items[5].trashedAt = Date.now() / 1000 - 2 * DAY;
 
   const albums: { id: number; name: string; cover: string | null; hashes: string[] }[] = [
-    { id: 1, name: 'Summer trip', cover: null, hashes: items.slice(0, 8).map((i) => i.content_hash) },
-    { id: 2, name: 'Favorites', cover: null, hashes: items.filter((i) => i.favorite).slice(0, 10).map((i) => i.content_hash) },
+    { id: 1, name: 'Summer trip', cover: items[0]?.path ?? null, hashes: items.slice(0, 8).map((i) => i.content_hash) },
+    {
+      id: 2,
+      name: 'Favorites',
+      cover: items.find((i) => i.favorite)?.path ?? null,
+      hashes: items.filter((i) => i.favorite).slice(0, 10).map((i) => i.content_hash),
+    },
   ];
-  albums[0].cover = albums[0].hashes[0];
 
   state = { items, persons, albums, captions: new Map() };
 }
@@ -227,6 +231,12 @@ function installMock(): void {
     selectFolder: () => Promise.resolve(null),
     request: (action, params = {}) => {
       switch (action) {
+        case 'get_image_preview': {
+          const item = findItem(String(params.file_path || ''));
+          if (!item) return ok({});
+          // The mock serves one gradient per content hash at any size.
+          return ok({ data_url: imageFor(item) });
+        }
         case 'open_library':
           return ok({
             path: 'C:/Photos', items: visible().length, missing: 0,
@@ -385,19 +395,26 @@ function installMock(): void {
               { geohash: 'dr5r', count: 4, items: [], cover: null, lat: 40.71, lon: -74.0, name: 'New York, USA' },
             ],
           });
-        case 'get_memories':
+        case 'get_memories': {
+          const memoryItems = visible().filter((i) => i.path.includes('memory'));
+          const favItems = visible().filter((i) => i.favorite).slice(0, 8);
           return ok({
             memories: [
               {
                 type: 'on_this_day', title: '1 year ago', years_ago: 1,
-                items: visible().filter((i) => i.path.includes('memory')), cover_hash: '', cover: null,
+                items: memoryItems,
+                cover_hash: memoryItems[0]?.content_hash ?? '',
+                cover: memoryItems[0]?.path ?? null,
               },
               {
                 type: 'highlights', title: 'Recent highlights',
-                items: visible().filter((i) => i.favorite).slice(0, 8), cover_hash: '', cover: null,
+                items: favItems,
+                cover_hash: favItems[0]?.content_hash ?? '',
+                cover: favItems[0]?.path ?? null,
               },
             ],
           });
+        }
         case 'get_duplicates':
           return ok({ groups: [] });
         case 'get_missing':
@@ -454,7 +471,7 @@ function installMock(): void {
     onBackendEvent: () => undefined,
     onBackendStatus: () => undefined,
   };
-  window.faceframe = api;
+  (window as { __mockApi?: unknown }).__mockApi = api;
 }
 
 export function isMock(): boolean {
@@ -465,6 +482,13 @@ export function installIfMissing(): boolean {
   // Idempotent across React StrictMode's double render.
   if ((window as { __mock?: boolean }).__mock === true) return true;
   if ('faceframe' in window) return false;
+  installMock();
+  (window as { __mock?: boolean }).__mock = true;
+  return true;
+}
+
+/** Forced mock (dev/visual review): ?mock=1 overrides a real preload API. */
+export function installForced(): boolean {
   installMock();
   (window as { __mock?: boolean }).__mock = true;
   return true;

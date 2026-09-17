@@ -21,12 +21,16 @@ def feed_groups(
     include_locked: bool = False,
     include_archived: bool = False,
     favorite: bool | None = None,
+    archived_only: bool = False,
+    limit: int = 4000,
 ) -> list:
     items = _base_items(
         store,
         include_locked=include_locked,
         include_archived=include_archived,
         favorite=favorite,
+        archived_only=archived_only,
+        limit=limit,
     )
     keyfn = {"days": _day_key, "months": _month_key, "years": _year_key}[view]
     groups: dict[str, list] = {}
@@ -43,6 +47,8 @@ def _base_items(
     include_locked: bool = False,
     include_archived: bool = False,
     favorite: bool | None = None,
+    archived_only: bool = False,
+    limit: int = 4000,
     extra_where: str = "",
     extra_params: tuple = (),
 ) -> list:
@@ -63,9 +69,12 @@ def _base_items(
     if favorite is not None:
         sql += " AND m.favorite=?"
         params.append(1 if favorite else 0)
+    if archived_only:
+        sql += " AND COALESCE(m.archived,0)=1"
     sql += _motion_pair_filter()
     sql += extra_where
-    sql += " ORDER BY ts DESC, f.path"
+    sql += " ORDER BY ts DESC, f.path LIMIT ?"
+    params.append(int(limit))
     with store.connect() as conn:
         rows = conn.execute(sql, (*params, *extra_params)).fetchall()
     items = [dict(r) for r in rows]
@@ -163,12 +172,17 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
         )
         params.append(value)
 
-    for value in parsed.get("place"):
-        where.append(
-            """EXISTS (SELECT 1 FROM geonames g
-                       WHERE m.exif LIKE '%' || ? || '%')"""
-        )
-        params.append(value)
+    place_values = parsed.get("place")
+    if place_values:
+        # Resolve geoname strings to geohash cells, then match the geohash
+        # the scan stored in media.flags.
+        cells = store.geohashes_for_names(place_values)
+        if cells:
+            clause = " OR ".join("m.flags LIKE ?" for _ in cells)
+            where.append(f"({clause})")
+            params.extend([f'%"geohash":"{cell}"%' for cell in cells])
+        else:
+            where.append("0=1")
 
     for value in parsed.get("folder"):
         where.append("f.path LIKE ?")
@@ -219,18 +233,18 @@ def _date_to_epoch(value: str, start: bool):
 def item_detail(store, path: str):
     with store.connect() as conn:
         file_row = conn.execute(
-            """SELECT path, content_hash, kind, size, mtime, added_at,
-                      missing, trashed_at
-               FROM files WHERE path=?""",
+            """SELECT f.path, f.content_hash, f.kind, f.size, f.mtime, f.added_at,
+                      f.missing, f.trashed_at,
+                      COALESCE(m.date_override, m.capture_time, f.mtime) AS ts
+               FROM files f JOIN media m ON m.content_hash = f.content_hash
+               WHERE f.path=?""",
             (path,),
         ).fetchone()
         if not file_row:
             return None
         media_row = conn.execute(
-            """SELECT *,
-                      COALESCE(date_override, capture_time, ?) AS ts
-               FROM media WHERE content_hash=?""",
-            (file_row["mtime"], file_row["content_hash"]),
+            "SELECT * FROM media WHERE content_hash=?",
+            (file_row["content_hash"],),
         ).fetchone()
         faces = conn.execute(
             """SELECT fa.id, fa.bbox, fa.person_id, fa.thumbnail_path,

@@ -144,9 +144,12 @@ export default function SettingsPage() {
       <section className="utility-card">
         <h2>About</h2>
         <p className="info-muted">
-          FaceFrame Photos — a fully local photo manager. No account, no backup,
-          no uploads. The entire index lives in a hidden <code>.faceframe</code> folder
-          inside your library; delete it and every trace of the app is gone.
+          FaceFrame Photos — a local photo manager. No account, no backup, no
+          uploads: your photos never leave this machine. The entire index lives
+          in a hidden <code>.faceframe</code> folder inside your library;
+          delete it and every trace of the app is gone. Optional online
+          conveniences (place-name lookup, one-time model downloads) can each
+          be switched off above.
         </p>
       </section>
     </div>

@@ -10,6 +10,10 @@ export function useImage(
   useEffect(() => {
     if (!path) return undefined;
     let cancelled = false;
+    if (path.startsWith('data:')) {
+      setState(path);
+      return undefined;
+    }
     setState(null);
     imageDataUrl(path, size, square).then((url) => {
       if (!cancelled) setState(url ?? 'failed');

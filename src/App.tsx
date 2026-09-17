@@ -133,14 +133,12 @@ export default function App() {
     }
   })();
 
-  const bare = route.page === 'settings' || route.page === 'locked';
-
   return (
     <div className="app">
       <TopBar />
       <div className="app-body">
-        {!bare && <Rail />}
-        <main className="content">{page}</main>
+        <Rail />
+        <main className={`content ${route.page === 'photos' ? 'content-grid' : ''}`}>{page}</main>
       </div>
 
       {viewer && viewer.items[viewer.index] && (

@@ -162,6 +162,8 @@ class PeopleService:
         """All faces of merge_id move under keep_id; merge_id is removed.
         The losing thumbnail file is cleaned up by the caller via the
         returned relative path (regenerable data, unlink directly)."""
+        if keep_id == merge_id:
+            raise ValueError("Cannot merge a person into itself")
         stale = self.store.merge_persons(keep_id, merge_id)
         return stale
 

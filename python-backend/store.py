@@ -172,13 +172,38 @@ class Store:
                 "SELECT path, content_hash, kind, size, mtime, missing FROM files"
             ).fetchall()
 
+    def all_file_states(self) -> dict:
+        """path -> state row, loaded once per scan pass (the discovery loop
+        would otherwise open two connections per file)."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT f.path, f.content_hash, f.kind, f.size, f.mtime,
+                          f.missing, f.added_at, m.analysis_state
+                   FROM files f LEFT JOIN media m
+                     ON m.content_hash = f.content_hash"""
+            ).fetchall()
+        return {r["path"]: r for r in rows}
+
     def get_file_state(self, path: str):
         with self.connect() as conn:
             return conn.execute(
-                """SELECT path, content_hash, kind, size, mtime, missing, added_at
+                """SELECT path, content_hash, kind, size, mtime, missing, added_at,
+                          trashed_at
                    FROM files WHERE path=?""",
                 (path,),
             ).fetchone()
+
+    def geohashes_for_names(self, names: list) -> list:
+        """Geohash cells whose cached place name matches any given string."""
+        if not names:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT geohash FROM geonames WHERE name IN (%s)"
+                % ",".join("?" for _ in names),
+                names,
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def get_media(self, content_hash: str):
         with self.connect() as conn:
@@ -199,9 +224,10 @@ class Store:
                        edit=(SELECT edit FROM media WHERE content_hash=?),
                        date_override=(SELECT date_override FROM media WHERE content_hash=?),
                        favorite=COALESCE((SELECT favorite FROM media WHERE content_hash=?), 0),
+                       archived=COALESCE((SELECT archived FROM media WHERE content_hash=?), 0),
                        locked=COALESCE((SELECT locked FROM media WHERE content_hash=?), 0)
                    WHERE content_hash=?""",
-                (old_hash, old_hash, old_hash, old_hash, old_hash, new_hash),
+                (old_hash, old_hash, old_hash, old_hash, old_hash, old_hash, new_hash),
             )
             conn.execute(
                 """UPDATE OR IGNORE album_items SET content_hash=?
@@ -223,10 +249,9 @@ class Store:
                         "SELECT COUNT(*) FROM files WHERE content_hash=?", (h,)
                     ).fetchone()[0]
                     if refs == 0:
-                        conn.execute(
+                        removed += conn.execute(
                             "DELETE FROM media WHERE content_hash=?", (h,)
-                        )
-                        removed += 1
+                        ).rowcount
                 return removed
             cur = conn.execute(
                 """DELETE FROM media WHERE content_hash NOT IN

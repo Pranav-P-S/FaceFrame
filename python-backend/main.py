@@ -238,7 +238,12 @@ def _prime_label_model():
 
 
 def busy_worker():
-    return _scan_thread is not None and _scan_thread.is_alive()
+    # A watcher pass scans the same library the manual scan would: the two
+    # must not interleave, or each pass's mark_missing flags the other's
+    # newly added files as missing.
+    if _scan_thread is not None and _scan_thread.is_alive():
+        return True
+    return _watcher.is_busy()
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +360,7 @@ def _get_feed(req):
         include_locked=bool(req.get("include_locked")),
         include_archived=bool(req.get("include_archived")),
         favorite=req.get("favorite"),
+        limit=int(req.get("limit", 4000)),
     )
     return {"groups": groups}
 
@@ -786,14 +792,44 @@ def _get_places(req):
     import places as places_mod
 
     ctx = locate_library(req["path"])
-    geocode = None
-    if req.get("geocode") and ctx["store"].get_meta("setting_geocode", "1") == "1":
-        geocode = places_mod.reverse_geocode
-    groups = places_mod.place_groups(ctx["store"], precision=req.get("precision", 4), geocode=geocode)
+    groups = places_mod.place_groups(ctx["store"], precision=req.get("precision", 4))
     for group in groups:
         group["cover"] = _abs(ctx, _cover_rel(ctx, group["cover_hash"]))
         group["items"] = [_abs(ctx, p) for p in group["items"]]
+    # Geocoding must never stall the command loop: cached names come back
+    # immediately; uncached cells are filled politely in the background
+    # (rate-limited, capped per pass) and announced with an event.
+    if req.get("geocode") and ctx["store"].get_meta("setting_geocode", "1") == "1":
+        threading.Thread(
+            target=_geocode_worker, args=(ctx, groups), daemon=True, name="geocode"
+        ).start()
     return {"places": groups}
+
+
+def _geocode_worker(ctx, groups, cap: int = 5):
+    import time as _time
+
+    import places as places_mod
+
+    store = ctx["store"]
+    filled = False
+    for group in groups:
+        if cap <= 0:
+            break
+        if group.get("name"):
+            continue
+        try:
+            name = places_mod.reverse_geocode(group["lat"], group["lon"])
+        except Exception as e:
+            logger.warning("Geocode failed: %s", e)
+            break
+        if name:
+            places_mod.set_geoname(store, group["geohash"], name)
+            filled = True
+        cap -= 1
+        _time.sleep(places_mod.GEOCODE_INTERVAL)
+    if filled:
+        emit({"event": "places_updated", "path": ctx["root"]})
 
 
 @action("get_memories")

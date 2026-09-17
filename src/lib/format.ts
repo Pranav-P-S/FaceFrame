@@ -1,5 +1,7 @@
 /** Date, size and duration formatting. Day grouping follows the item's
- * naive wall-clock time (the backend stores capture time that way). */
+ * naive wall-clock time (the backend stores capture time that way), so all
+ * key derivation uses UTC getters — matching the backend's time.gmtime
+ * grouping exactly, independent of the viewer's local timezone. */
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -9,7 +11,7 @@ const MONTHS = [
 export function dayKey(ts: number): string {
   const d = new Date(ts * 1000);
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 export function monthKey(ts: number): string {
@@ -22,21 +24,21 @@ export function yearKey(ts: number): string {
 
 /** Human label for a group key ("Today", "Yesterday", "March 10", …). */
 export function groupLabel(key: string, view: 'days' | 'months' | 'years'): string {
-  const today = new Date();
+  const now = new Date();
   const iso = (d: Date) => {
     const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
   };
   if (view === 'years') return key;
   if (view === 'months') {
     const [y, m] = key.split('-').map(Number);
     return `${MONTHS[m - 1]} ${y}`;
   }
-  if (key === iso(today)) return 'Today';
-  const yesterday = new Date(today.getTime() - 86400_000);
+  if (key === iso(now)) return 'Today';
+  const yesterday = new Date(now.getTime() - 86400_000);
   if (key === iso(yesterday)) return 'Yesterday';
   const [y, m, d] = key.split('-').map(Number);
-  const sameYear = y === today.getFullYear();
+  const sameYear = y === now.getUTCFullYear();
   return sameYear ? `${MONTHS[m - 1]} ${d}` : `${MONTHS[m - 1]} ${d}, ${y}`;
 }
 

@@ -59,7 +59,9 @@ def render_preview(
 
     edit = edit or {}
     key_source = f"{content_hash}#{max_dim}#{int(square)}#{_edit_digest(edit)}"
-    cache_name = f"{content_hash[:16]}_{_digest16(key_source)}.jpg"
+    # Full 64-char content hash: the scan-time GC recognizes cached files by
+    # exact hash membership, so the name must carry the whole digest.
+    cache_name = f"{content_hash}_{_digest16(key_source)}.jpg"
     previews_dir = Path(library_root) / ".faceframe" / PREVIEW_DIR
     cache_path = previews_dir / cache_name
     if cache_path.is_file():
@@ -160,6 +162,11 @@ def export_baked(
 def _apply_edit(img, edit: dict):
     import cv2
     import numpy as np
+
+    # Eraser rects are normalized to the full image: inpaint before any
+    # geometry so saved erasures render identically in previews and exports.
+    if edit.get("eraser"):
+        img = _inpaint_rects(img, edit["eraser"])
 
     filter_name = edit.get("filter")
     adjust = dict(edit.get("adjust") or {})

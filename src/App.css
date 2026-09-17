@@ -92,6 +92,20 @@ img {
   overflow-y: auto;
 }
 
+/* Grid pages virtualize their own scroll container: exactly one scrollbar. */
+.content-grid {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-grid .page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ------------------------------------------------------------ top bar */
 
 .topbar {
@@ -478,7 +492,8 @@ img {
 .grid-scroll {
   position: relative;
   overflow-y: auto;
-  height: calc(100vh - 210px);
+  flex: 1;
+  min-height: 0;
 }
 
 .grid-header {

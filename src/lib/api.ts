@@ -3,7 +3,7 @@ import { api } from '../types';
 /** Typed convenience wrappers over the generic request channel. */
 export const backend = {
   openLibrary: (path: string) => call('open_library', { path }),
-  getFeed: (opts: { view?: string; include_archived?: boolean; include_locked?: boolean; favorite?: boolean } = {}) =>
+  getFeed: (opts: { view?: string; include_archived?: boolean; include_locked?: boolean; favorite?: boolean; archived_only?: boolean; limit?: number } = {}) =>
     call('get_feed', opts),
   search: (query: string, include_locked = false) => call('search', { query, include_locked }),
   getItem: (path: string) => call('get_item', { path }),

@@ -72,6 +72,8 @@ function registerAppProtocol() {
 
 const mediaRoots = new Set();
 
+// Only real media files are ever streamed — a compromised renderer must not
+// be able to read documents through the scheme.
 const MEDIA_MIME = {
   '.mp4': 'video/mp4',
   '.m4v': 'video/mp4',
@@ -81,6 +83,13 @@ const MEDIA_MIME = {
   '.mkv': 'video/x-matroska',
   '.wmv': 'video/x-ms-wmv',
   '.3gp': 'video/3gpp',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
   '.gif': 'image/gif',
 };
 
@@ -88,19 +97,23 @@ function registerMediaProtocol() {
   protocol.handle(MEDIA_SCHEME, (request) => {
     try {
       const url = new URL(request.url);
-      const requested = path.normalize(
-        decodeURIComponent(url.searchParams.get('path') || '')
-      );
-      const underRoot = [...mediaRoots].some((root) =>
-        requested.toLowerCase().startsWith(path.normalize(root).toLowerCase())
-      );
+      // searchParams.get already percent-decodes; a second decode would
+      // throw on filenames containing '%'.
+      const requested = path.normalize(url.searchParams.get('path') || '');
+      const lower = requested.toLowerCase();
+      // Separator-safe containment (a root must not admit prefix siblings)
+      // and our metadata folder is never streamed.
+      const underRoot = [...mediaRoots].some((root) => {
+        const r = path.normalize(root);
+        const rl = r.toLowerCase();
+        return requested === r || lower.startsWith(rl.endsWith(path.sep) ? rl : rl + path.sep);
+      });
       const allowed =
-        underRoot && !requested.toLowerCase().includes('.faceframe');
+        underRoot && !lower.includes('.faceframe') && MEDIA_MIME[path.extname(lower)];
       if (!allowed) {
         return new Response('Forbidden', { status: 403 });
       }
-      const mime =
-        MEDIA_MIME[path.extname(requested).toLowerCase()] || 'application/octet-stream';
+      const mime = MEDIA_MIME[path.extname(lower)];
       const stat = fs.statSync(requested);
       const range = request.headers.Range || request.headers.range;
       if (range) {
@@ -427,20 +440,24 @@ function registerIpc() {
       : result.filePaths[0];
   });
 
-  // Every action that names a library folder also registers it as a media
-  // root, so media:// only ever streams indexed libraries.
-  const noteRoot = (message) => {
-    const folder = message.path || message.folder;
-    if (typeof folder === 'string' && folder) addMediaRoot(folder);
-  };
+  // open_library/scan name a library folder; once the backend confirms the
+  // folder is real, the main process registers it as a media root. Roots are
+  // therefore only ever backend-verified paths — never raw renderer input.
+  const LIBRARY_ACTIONS = new Set(['open_library', 'scan']);
 
   const passThrough = (channel, mapArgs) =>
     ipcMain.handle(channel, (_event, ...args) => {
       requireBackend();
       const message = mapArgs(...args);
       message.id = nextRequestId++;
-      noteRoot(message);
-      return sendToPython(message);
+      const folder =
+        LIBRARY_ACTIONS.has(message.action) && typeof message.path === 'string'
+          ? message.path
+          : null;
+      return sendToPython(message).then((result) => {
+        if (folder) addMediaRoot(folder);
+        return result;
+      });
     });
 
   // Generic surface: request('action', params). Kept alongside the named
@@ -449,8 +466,14 @@ function registerIpc() {
     requireBackend();
     const message = { action, ...(params || {}) };
     message.id = nextRequestId++;
-    noteRoot(message);
-    return sendToPython(message);
+    const folder =
+      LIBRARY_ACTIONS.has(action) && typeof message.path === 'string'
+        ? message.path
+        : null;
+    return sendToPython(message).then((result) => {
+      if (folder) addMediaRoot(folder);
+      return result;
+    });
   });
 
   passThrough('get-providers', () => ({ action: 'get_providers' }));

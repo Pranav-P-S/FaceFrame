@@ -153,10 +153,12 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
           <span className="va-icon">{detail?.media?.favorite ? '★' : '☆'}</span>
           <span>Favorite</span>
         </button>
-        <button className="viewer-action" onClick={() => setEditing(true)} title="Edit">
-          <span className="va-icon">✎</span>
-          <span>Edit</span>
-        </button>
+        {!isVideo && (
+          <button className="viewer-action" onClick={() => setEditing(true)} title="Edit">
+            <span className="va-icon">✎</span>
+            <span>Edit</span>
+          </button>
+        )}
         <button className={`viewer-action ${infoOpen ? 'viewer-action-active' : ''}`} onClick={() => setInfoOpen(!infoOpen)} title="Info (i)">
           <span className="va-icon">ⓘ</span>
           <span>Info</span>
@@ -211,12 +213,12 @@ function ViewerImage({
       />
     );
   }
-  return (
+  return url ? (
     <img
       key={item.path}
-      src={url ?? ''}
+      src={url}
       alt=""
-      className={`viewer-media ${url ? '' : 'viewer-media-loading'}`}
+      className="viewer-media"
       style={{ transform: `scale(${zoom})` }}
       onDoubleClick={() => setZoom((z) => (z > 1 ? 1 : 2.5))}
       onWheel={(e) => {
@@ -224,6 +226,8 @@ function ViewerImage({
         else setZoom((z) => Math.max(0.2, z / 1.15));
       }}
     />
+  ) : (
+    <div className="viewer-media viewer-media-loading" />
   );
 }
 
@@ -249,7 +253,10 @@ function InfoPanel({ detail, onRefresh }: { detail: ItemDetail; onRefresh: () =>
               value={dateText}
               onChange={(e) => setDateText(e.target.value)}
               onBlur={async () => {
-                const epoch = new Date(dateText).getTime() / 1000;
+                // The index stores naive wall time as UTC; datetime-local
+                // must be parsed the same way or edits shift by the local
+                // UTC offset.
+                const epoch = Date.parse(`${dateText}:00Z`) / 1000;
                 if (Number.isFinite(epoch) && Math.abs(epoch - detail.ts) > 1) {
                   await backend.setDateOverride(detail.content_hash, epoch);
                   showToast({

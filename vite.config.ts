@@ -9,7 +9,7 @@ function cspForProduction(): Plugin {
     apply: "build",
     transformIndexHtml(html) {
       const csp =
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' media:; connect-src 'self'";
       return html.replace(
         "<head>",
         `<head>\n    <meta http-equiv="Content-Security-Policy" content="${csp}" />`

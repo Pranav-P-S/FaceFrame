@@ -73,6 +73,7 @@ class ScanPipeline:
 
         seen_paths = set()
         pending = []  # (abs_path, rel_path, stat)
+        known = self.store.all_file_states()
         for abs_path in discovered:
             if self.abort_check():
                 return self._cancelled(stats)
@@ -83,13 +84,17 @@ class ScanPipeline:
             except OSError as e:
                 logger.warning("Cannot stat %s: %s", abs_path, e)
                 continue
-            existing = self.store.get_file_state(rel_path)
+            existing = known.get(rel_path)
             if (
                 existing
                 and existing["content_hash"]
                 and not existing["missing"]
                 and existing["size"] == stat.st_size
                 and existing["mtime"] == stat.st_mtime
+                # Content indexed by a pass without face models stays
+                # 'hashed': it must not be short-circuited here or it would
+                # never receive faces.
+                and existing["analysis_state"] == "analyzed"
             ):
                 stats["skipped_unchanged"] += 1
                 continue
@@ -105,7 +110,7 @@ class ScanPipeline:
             except OSError as e:
                 logger.warning("Cannot read %s: %s", abs_path, e)
                 continue
-            existing = self.store.get_file_state(rel_path)
+            existing = known.get(rel_path)
             if existing and existing["content_hash"] == hash_hex:
                 # Touched but byte-identical: refresh stat mirror only.
                 self.store.upsert_file(
@@ -159,7 +164,9 @@ class ScanPipeline:
             scan_errors.append(err)
 
         for dirpath, dirnames, filenames in os.walk(self.root, onerror=on_error):
-            dirnames[:] = [d for d in dirnames if d != DATA_DIR_NAME]
+            # Case-insensitive: .FaceFrame must never be indexed on a
+            # filesystem that treats it as our metadata folder.
+            dirnames[:] = [d for d in dirnames if d.lower() != DATA_DIR_NAME.lower()]
             for name in filenames:
                 if Path(name).suffix.lower() in VALID_EXTENSIONS:
                     images.append(os.path.join(dirpath, name))
@@ -184,7 +191,10 @@ class ScanPipeline:
             "capture_time": stat.st_mtime,
             "tz_offset": None,
             "exif": None,
-            "analysis_state": "analyzed",
+            # 'hashed' until faces complete; the dedup gate only skips
+            # 'analyzed' media, so a pass without engines leaves the content
+            # for the next engine-bearing pass to analyze fully.
+            "analysis_state": "hashed",
             "analyzed_at": time.time(),
         }
 
@@ -198,7 +208,6 @@ class ScanPipeline:
             from hashing import perceptual_hash
 
             meta["phash"] = perceptual_hash(img)
-            meta["flags"] = _dumps(_photo_flags(rel_path, width, height))
             exif_info = exif_extract(abs_path)
             meta["capture_time"] = (
                 exif_info["capture_time"] if exif_info["capture_time"] is not None
@@ -206,6 +215,16 @@ class ScanPipeline:
             )
             meta["tz_offset"] = exif_info["tz_offset"]
             meta["exif"] = _dumps(exif_info["exif"]) if exif_info["exif"] else None
+            flags = _photo_flags(rel_path, width, height)
+            gps = exif_info["exif"].get("gps") if exif_info["exif"] else None
+            if gps and len(gps) == 2:
+                try:
+                    from places import geohash
+
+                    flags["geohash"] = geohash(gps[0], gps[1], 4)
+                except Exception:
+                    pass
+            meta["flags"] = _dumps(flags)
             if self.labeler is not None:
                 try:
                     meta["labels"] = _dumps(self.labeler.label(img))
@@ -228,6 +247,7 @@ class ScanPipeline:
         )
         stats["decoded"] += 1
 
+        analyzed = kind == "video"
         if kind == "photo" and self.face_engine is not None:
             faces = self._safe_faces(abs_path, img, hash_hex)
             if faces is not None:
@@ -238,8 +258,16 @@ class ScanPipeline:
                         )
                 self.store.add_faces(hash_hex, faces)
                 stats["faces"] += len(faces)
+                analyzed = True
         elif kind == "photo":
+            # No engine this pass: faces stay empty and the media row stays
+            # 'hashed', so a later engine-bearing pass reprocesses it.
             self.store.add_faces(hash_hex, [])
+
+        if analyzed:
+            self.store.upsert_media(
+                {"content_hash": hash_hex, "analysis_state": "analyzed"}
+            )
 
     def _safe_faces(self, abs_path, img, hash_hex):
         try:

@@ -39,9 +39,12 @@ export function justifyRows(
 
   const flush = (isLast: boolean) => {
     if (!current.length) return;
-    const height = isLast
-      ? targetRowHeight
-      : (containerWidth - gap * (current.length - 1)) / currentAspectSum;
+    let height = (containerWidth - gap * (current.length - 1)) / currentAspectSum;
+    if (isLast) {
+      // Google-Photos behavior: a leftover row stretches to full width but
+      // never grows absurdly tall for one or two wide items.
+      height = Math.min(height, targetRowHeight * 2.2);
+    }
     const row: Row = { items: [], height, y };
     let x = 0;
     for (const index of current) {

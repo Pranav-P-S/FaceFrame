@@ -53,7 +53,7 @@ export default function TopBar() {
   useEffect(() => {
     if (lastRoute.current !== route) {
       lastRoute.current = route;
-      if (route.page !== 'search') setQuery('');
+      setQuery(route.page === 'search' ? route.query : '');
     }
   }, [route]);
 

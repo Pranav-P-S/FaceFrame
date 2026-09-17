@@ -22,7 +22,8 @@ from store import Store
 logger = logging.getLogger("FaceFrame.Library")
 
 TRASH_RETENTION_DAYS = 60
-PBKDF2_ITERATIONS = 120_000
+# 600k follows current OWASP guidance for PBKDF2-HMAC-SHA256.
+PBKDF2_ITERATIONS = 600_000
 
 try:
     from send2trash import send2trash
@@ -35,6 +36,16 @@ class LibraryService:
     def __init__(self, store: Store, library_root: str):
         self.store = store
         self.root = str(Path(library_root).resolve())
+
+    def _contained(self, path: str) -> Path:
+        """Resolve a user/renderer-supplied path and refuse anything outside
+        the library root — absolute paths, '..' escapes, prefix siblings."""
+        candidate = Path(path)
+        resolved = (Path(self.root) / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+        root = Path(self.root).resolve()
+        if os.path.commonpath([str(root), str(resolved)]) != str(root) or resolved == root:
+            raise ValueError(f"Path is outside the library: {path}")
+        return resolved
 
     # ---------------------------------------------------------------- media
 
@@ -106,17 +117,31 @@ class LibraryService:
     ):
         """Trash/restore by content hash, or by file paths when given."""
         stamp = time.time() if trashed else None
+        rel_paths = [
+            self._contained(p).relative_to(Path(self.root).resolve()).as_posix()
+            for p in (paths or [])
+        ]
         with self.store.connect() as conn:
-            if paths:
+            if rel_paths:
                 conn.executemany(
                     "UPDATE files SET trashed_at=? WHERE path=?",
-                    [(stamp, p) for p in paths],
+                    [(stamp, p) for p in rel_paths],
                 )
             if content_hashes:
                 conn.executemany(
-                    """UPDATE files SET trashed_at=? WHERE content_hash=?""",
+                    "UPDATE files SET trashed_at=? WHERE content_hash=?",
                     [(stamp, h) for h in content_hashes],
                 )
+                if not rel_paths:
+                    rows = conn.execute(
+                        "SELECT path FROM files WHERE content_hash IN (%s)"
+                        % ",".join("?" for _ in content_hashes),
+                        content_hashes,
+                    ).fetchall()
+                    rel_paths = [r["path"] for r in rows]
+        # Keep full-text aligned with visibility in both directions.
+        if rel_paths:
+            self.store.sync_fts(rel_paths)
 
     def trashed_items(self):
         with self.store.connect() as conn:
@@ -142,16 +167,30 @@ class LibraryService:
                 removed += 1
         return removed
 
+
     def delete_from_disk(self, paths: list) -> int:
+        """Explicit, confirm-guarded-in-UI deletion. Every path must resolve
+        inside the library AND be indexed AND currently trashed — a renderer
+        can never turn this into an arbitrary-file delete."""
         removed = 0
         for path in paths:
-            if self._send_path_to_os_trash(path):
-                self.store.remove_file(path)
+            resolved = self._contained(path)
+            rel = resolved.relative_to(Path(self.root).resolve()).as_posix()
+            state = self.store.get_file_state(rel)
+            if not state or not state["trashed_at"]:
+                logger.warning("Refusing to delete non-trashed or unindexed path: %s", path)
+                continue
+            if self._send_path_to_os_trash(rel):
+                self.store.remove_file(rel)
                 removed += 1
         return removed
 
     def _send_path_to_os_trash(self, rel_path: str) -> bool:
-        absolute = str(Path(self.root) / rel_path)
+        try:
+            absolute = str(self._contained(rel_path))
+        except ValueError as e:
+            logger.error("Refusing path outside the library: %s", e)
+            return False
         try:
             if os.path.isfile(absolute):
                 send2trash(absolute)
@@ -163,7 +202,8 @@ class LibraryService:
     # --------------------------------------------------------------- locked
 
     def lock_passcode_set(self) -> bool:
-        return self.store.get_meta("locked_salt") is not None
+        # Empty strings mean "removed" — only a real salt counts.
+        return bool(self.store.get_meta("locked_salt"))
 
     def set_locked_passcode(self, code: str):
         code = (code or "").strip()

@@ -147,22 +147,39 @@ CREATE TABLE IF NOT EXISTS fts_map (
 
 
 def ensure_schema(conn: sqlite3.Connection, library_root: str | None = None):
-    """Bring a database to SCHEMA_VERSION, creating or migrating as needed."""
+    """Bring a database to SCHEMA_VERSION, creating or migrating as needed.
+
+    SQLite DDL is transactional, but ``executescript`` issues an implicit
+    COMMIT first — so the DDL is driven statement-by-statement here and the
+    whole migration (or fresh create) commits atomically with the version
+    stamp. A crash mid-migration therefore rolls back entirely and retries
+    cleanly instead of leaving a half-migrated index."""
     conn.execute("PRAGMA foreign_keys=ON")
     version = _detect_version(conn)
     if version == SCHEMA_VERSION:
         return
     if version == 0:
-        conn.executescript(V3_DDL)
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
+        _run_ddl(conn)
+        _stamp_version(conn)
         return
     if version in (1, 2):
         _migrate_v1_v2_to_v3(conn, library_root)
         return
     raise RuntimeError(f"Unknown index schema version: {version}")
+
+
+def _run_ddl(conn: sqlite3.Connection):
+    for statement in V3_DDL.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+
+
+def _stamp_version(conn: sqlite3.Connection):
+    conn.execute(
+        """INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+        (str(SCHEMA_VERSION),),
+    )
 
 
 def _detect_version(conn: sqlite3.Connection) -> int:
@@ -192,7 +209,7 @@ def _migrate_v1_v2_to_v3(conn: sqlite3.Connection, library_root: str | None):
     for idx in ("idx_faces_person", "idx_faces_file"):
         conn.execute(f"DROP INDEX IF EXISTS {idx}")
 
-    conn.executescript(V3_DDL)
+    _run_ddl(conn)
 
     conn.execute(
         """INSERT INTO persons (id, name, thumbnail_path, hidden, created_at)
@@ -211,6 +228,7 @@ def _migrate_v1_v2_to_v3(conn: sqlite3.Connection, library_root: str | None):
         faces_by_file.setdefault(row["file_path"], []).append(row)
 
     media_seen: set[str] = set()
+    face_counts: dict[str, int] = {}  # content hash -> next face index
     for rel_path, hash_hex in hashed.items():
         stat = conn.execute(
             "SELECT modified_time, size, scanned_at FROM _v2_files WHERE path=?",
@@ -231,7 +249,12 @@ def _migrate_v1_v2_to_v3(conn: sqlite3.Connection, library_root: str | None):
                 (rel_path, hash_hex, stat["size"], stat["modified_time"],
                  stat["scanned_at"], stat["scanned_at"]),
             )
-            for face_index, face in enumerate(faces_by_file.get(rel_path, [])):
+            # v1 was path-addressed, so byte-identical copies each carry their
+            # own face rows; face_index is per content hash and must keep
+            # counting across files or the UNIQUE constraint fires.
+            for face in faces_by_file.get(rel_path, []):
+                face_index = face_counts.get(hash_hex, 0)
+                face_counts[hash_hex] = face_index + 1
                 conn.execute(
                     """INSERT INTO faces (content_hash, face_index, bbox, embedding,
                                           det_score, thumbnail_path, person_id)
@@ -251,9 +274,7 @@ def _migrate_v1_v2_to_v3(conn: sqlite3.Connection, library_root: str | None):
                  stat["scanned_at"], stat["scanned_at"]),
             )
 
-    conn.execute(
-        "UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
-    )
+    _stamp_version(conn)
     conn.execute("DROP TABLE _v2_faces")
     conn.execute("DROP TABLE _v2_files")
     conn.execute("DROP TABLE _v2_persons")

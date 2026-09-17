@@ -35,7 +35,7 @@ def parse(raw: str) -> Query:
             key, _, value = token.partition(":")
             key = key.lower()
             value = value.strip().strip('"')
-            if key == "year":
+            if key == "year" and value.isdigit() and len(value) == 4:
                 query.filters.setdefault("after", []).append(f"{value}-01-01")
                 query.filters.setdefault("before", []).append(f"{int(value) + 1}-01-01")
                 continue

@@ -25,6 +25,9 @@ def build_memories(
     highlights: bool = True,
 ) -> list:
     now_epoch = now_epoch if now_epoch is not None else time.time()
+    if today_month_day is None:
+        struct = time.gmtime(now_epoch)
+        today_month_day = (struct.tm_mon, struct.tm_mday)
     memories: list = []
     if on_this_day:
         memories.extend(_on_this_day(store, today_month_day, now_epoch))

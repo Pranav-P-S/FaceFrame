@@ -21,16 +21,16 @@ export default function Rail() {
   return (
     <nav className="rail" aria-label="Main navigation">
       <div className="rail-section">
-        <NavItem icon="img" label="Photos" href="#/photos" active={route.page === 'photos'} />
-        <NavItem icon="cmp" label="Explore" href="#/explore" active={route.page === 'explore'} />
-        <NavItem icon="shr" label="Sharing" href="#/sharing" active={false} />
+        <NavItem icon="▦" label="Photos" href="#/photos" active={route.page === 'photos'} />
+        <NavItem icon="✦" label="Explore" href="#/explore" active={route.page === 'explore'} />
+        <NavItem icon="⤴" label="Sharing" href="#/sharing" active={false} />
       </div>
       <div className="rail-section-label">Library</div>
       <div className="rail-section">
-        <NavItem icon="cal" label="Utilities" href="#/utilities" active={route.page === 'utilities'} />
-        <NavItem icon="fold" label="Archive" href="#/archive" active={route.page === 'archive'} />
-        <NavItem icon="trash" label="Trash" href="#/trash" active={route.page === 'trash'} />
-        <NavItem icon="lock" label="Locked" href="#/locked" active={route.page === 'locked'} />
+        <NavItem icon="⚙" label="Utilities" href="#/utilities" active={route.page === 'utilities'} />
+        <NavItem icon="❐" label="Archive" href="#/archive" active={route.page === 'archive'} />
+        <NavItem icon="🗑" label="Trash" href="#/trash" active={route.page === 'trash'} />
+        <NavItem icon="🔒" label="Locked" href="#/locked" active={route.page === 'locked'} />
       </div>
     </nav>
   );

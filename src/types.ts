@@ -191,5 +191,13 @@ export interface FaceFrameApi {
 }
 
 export function api(): FaceFrameApi {
-  return (window as unknown as { faceframe: FaceFrameApi }).faceframe;
+  const w = window as unknown as {
+    faceframe?: FaceFrameApi;
+    __mockApi?: FaceFrameApi;
+  };
+  // ?mock=1 forces the dev mock even where a real preload exists.
+  if (new URLSearchParams(window.location.search).has('mock') && w.__mockApi) {
+    return w.__mockApi;
+  }
+  return (w.faceframe ?? w.__mockApi) as FaceFrameApi;
 }

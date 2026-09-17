@@ -68,11 +68,12 @@ export default function Editor({
     debounceRef.current = window.setTimeout(async () => {
       setBusy(true);
       try {
-        const hasEdit = Object.keys(edit).length > 0;
+        const hasEdit = Object.keys(edit).length > 0 || rects.length > 0;
         const res = await api().request('get_image_preview', {
           file_path: filePath,
           max_dim: 1600,
-          ...(hasEdit ? { edit } : {}),
+          // An empty local edit must preview the ORIGINAL, not the stored one
+          ...(hasEdit ? { edit } : { apply_edit: false }),
         });
         setPreview((res as { data_url?: string }).data_url ?? null);
       } finally {
@@ -143,7 +144,7 @@ export default function Editor({
             onPointerMove={(e) => tab === 'eraser' && dragStart.current && onEraserPointer(e, false)}
             onPointerUp={() => tab === 'eraser' && commitRect()}
           >
-            <img src={preview ?? ''} alt="" />
+            {preview ? <img src={preview} alt="" /> : null}
             {currentRect && (
               <div
                 className="eraser-rect"
