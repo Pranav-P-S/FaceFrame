@@ -131,9 +131,15 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
-    content_hash UNINDEXED,
     text,
     tokenize='unicode61 remove_diacritics 2'
+);
+
+-- rowid-joined mapping so FTS rows can be updated per file incrementally.
+CREATE TABLE IF NOT EXISTS fts_map (
+    rowid INTEGER PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    content_hash TEXT NOT NULL
 );
 """
 

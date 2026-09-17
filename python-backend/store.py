@@ -169,6 +169,153 @@ class Store:
                 "SELECT path, content_hash, kind, size, mtime, missing FROM files"
             ).fetchall()
 
+    def get_file_state(self, path: str):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT path, content_hash, kind, size, mtime, missing, added_at
+                   FROM files WHERE path=?""",
+                (path,),
+            ).fetchone()
+
+    def get_media(self, content_hash: str):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT * FROM media WHERE content_hash=?", (content_hash,)
+            ).fetchone()
+
+    def migrate_media_state(self, old_hash: str, new_hash: str):
+        """A file's content changed in place (edited). Carry user state and
+        album membership to the new content so the user's intent follows the
+        logical item, then drop the old media row if it is now unreferenced."""
+        if old_hash == new_hash:
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE media SET
+                       caption=(SELECT caption FROM media WHERE content_hash=?),
+                       edit=(SELECT edit FROM media WHERE content_hash=?),
+                       date_override=(SELECT date_override FROM media WHERE content_hash=?),
+                       favorite=COALESCE((SELECT favorite FROM media WHERE content_hash=?), 0),
+                       locked=COALESCE((SELECT locked FROM media WHERE content_hash=?), 0)
+                   WHERE content_hash=?""",
+                (old_hash, old_hash, old_hash, old_hash, old_hash, new_hash),
+            )
+            conn.execute(
+                """UPDATE OR IGNORE album_items SET content_hash=?
+                   WHERE content_hash=?""",
+                (new_hash, old_hash),
+            )
+            conn.execute(
+                "DELETE FROM album_items WHERE content_hash=?", (old_hash,)
+            )
+        self.prune_orphan_media([old_hash])
+
+    def prune_orphan_media(self, only_hashes: list | None = None) -> int:
+        """Delete media rows no file references anymore (faces cascade)."""
+        with self.connect() as conn:
+            if only_hashes:
+                removed = 0
+                for h in only_hashes:
+                    refs = conn.execute(
+                        "SELECT COUNT(*) FROM files WHERE content_hash=?", (h,)
+                    ).fetchone()[0]
+                    if refs == 0:
+                        conn.execute(
+                            "DELETE FROM media WHERE content_hash=?", (h,)
+                        )
+                        removed += 1
+                return removed
+            cur = conn.execute(
+                """DELETE FROM media WHERE content_hash NOT IN
+                   (SELECT DISTINCT content_hash FROM files
+                    WHERE content_hash IS NOT NULL)"""
+            )
+            return cur.rowcount
+
+    def known_hashes(self) -> set:
+        with self.connect() as conn:
+            return {
+                r[0]
+                for r in conn.execute("SELECT content_hash FROM media")
+            }
+
+    def referenced_face_thumbs(self) -> list:
+        with self.connect() as conn:
+            return [
+                r[0]
+                for r in conn.execute(
+                    """SELECT DISTINCT thumbnail_path FROM faces
+                       WHERE thumbnail_path IS NOT NULL"""
+                )
+            ]
+
+    def mark_missing(self, seen_paths: set) -> int:
+        """Flag indexed files not seen in this pass; never auto-delete."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT path, missing FROM files WHERE missing=0"
+            ).fetchall()
+            gone = [r["path"] for r in rows if r["path"] not in seen_paths]
+            conn.executemany(
+                "UPDATE files SET missing=1 WHERE path=?",
+                [(p,) for p in gone],
+            )
+            return len(gone)
+
+    # -- full-text ---------------------------------------------------------
+
+    def sync_fts(self, changed_paths: list | None = None):
+        """Reindex full-text rows. With no argument, reindexes everything
+        (used at scan end); otherwise only the given file paths."""
+        with self.connect() as conn:
+            if changed_paths is None:
+                conn.execute("DELETE FROM fts_map")
+                conn.execute("DELETE FROM media_fts")
+                rows = conn.execute(
+                    """SELECT f.path, f.content_hash, m.caption, m.labels
+                       FROM files f JOIN media m ON m.content_hash=f.content_hash
+                       WHERE f.missing=0 AND f.trashed_at IS NULL"""
+                ).fetchall()
+            else:
+                rows = []
+                for path in changed_paths:
+                    conn.execute("DELETE FROM fts_map WHERE path=?", (path,))
+                    row = conn.execute(
+                        """SELECT f.path, f.content_hash, m.caption, m.labels
+                           FROM files f JOIN media m ON m.content_hash=f.content_hash
+                           WHERE f.path=? AND f.missing=0 AND f.trashed_at IS NULL""",
+                        (path,),
+                    ).fetchone()
+                    if row:
+                        rows.append(row)
+            for row in rows:
+                text = _fts_text(row["path"], row["caption"], row["labels"])
+                cur = conn.execute(
+                    "INSERT INTO fts_map (path, content_hash) VALUES (?, ?)",
+                    (row["path"], row["content_hash"]),
+                )
+                conn.execute(
+                    "INSERT INTO media_fts (rowid, text) VALUES (?, ?)",
+                    (cur.lastrowid, text),
+                )
+
+    def search_text(self, query: str) -> list:
+        """FTS lookup over captions, labels and filenames; returns file hits."""
+        terms = [t for t in query.replace('"', " ").split() if t]
+        if not terms:
+            return []
+        match = " AND ".join(f'"{t}"' for t in terms)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT m.path, m.content_hash
+                   FROM media_fts fts
+                   JOIN fts_map m ON m.rowid = fts.rowid
+                   WHERE media_fts MATCH ?
+                   LIMIT 500""",
+                (match,),
+            ).fetchall()
+        return [{"path": r["path"], "content_hash": r["content_hash"]} for r in rows]
+
     # -- faces -----------------------------------------------------------
 
     def add_faces(self, content_hash: str, faces: list):
@@ -218,3 +365,22 @@ def _dumps(value) -> str:
     import json
 
     return value if isinstance(value, str) else json.dumps(value)
+
+
+def _fts_text(path: str, caption: str | None, labels: str | None) -> str:
+    """One FTS document per file: caption + labels + its path components."""
+    import json
+    from pathlib import PurePosixPath
+
+    parts = []
+    if caption:
+        parts.append(caption)
+    if labels:
+        try:
+            parts.extend(json.loads(labels))
+        except (TypeError, ValueError):
+            pass
+    parts.append(path.replace("/", " "))
+    stem = PurePosixPath(path).stem.replace("_", " ").replace("-", " ")
+    parts.append(stem)
+    return " ".join(parts)
