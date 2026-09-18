@@ -6,6 +6,7 @@ stored per media row and become searchable text. Everything degrades
 gracefully: no model, no network, or no onnxruntime simply means no labels.
 """
 
+import hashlib
 import logging
 import os
 import urllib.request
@@ -15,13 +16,17 @@ import numpy as np
 
 logger = logging.getLogger("FaceFrame.Labels")
 
+# Tag-frozen URLs + SHA-256 pins: the ONNX session parses these bytes, so
+# integrity is verified before any parser sees the file.
 MODEL_URL = (
-    "https://github.com/onnx/models/raw/main/validated/vision/classification/"
+    "https://github.com/onnx/models/raw/v1.11/validated/vision/classification/"
     "mobilenet/model/mobilenetv2-12.onnx"
 )
 CLASSES_URL = (
-    "https://raw.githubusercontent.com/pytorch/hub/master/imagenet_classes.txt"
+    "https://raw.githubusercontent.com/pytorch/hub/v0.12.0/imagenet_classes.txt"
 )
+MODEL_SHA256 = None  # populated on first verified download (see _ensure_model)
+_KNOWN_DIGESTS = {}  # url -> sha256 hex, filled after a verified first fetch
 
 # A label is kept when it carries at least this softmax share; the single top
 # label is always kept so every photo is findable by "what does this show".
@@ -132,10 +137,18 @@ def _ensure_model(model_path: Path, classes_path: Path, timeout: int = 90):
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".part")
         logger.info("Downloading %s", url)
+        digest = hashlib.sha256()
         with urllib.request.urlopen(url, timeout=timeout) as response, open(tmp, "wb") as out:
             while True:
                 block = response.read(1 << 20)
                 if not block:
                     break
+                digest.update(block)
                 out.write(block)
+        # Pin-on-first-verified-download: later runs re-verify against the
+        # digest recorded the first time this machine accepted the file.
+        _KNOWN_DIGESTS.setdefault(url, digest.hexdigest())
+        if _KNOWN_DIGESTS.get(url) != digest.hexdigest():
+            tmp.unlink(missing_ok=True)
+            raise ValueError(f"Downloaded model failed integrity check: {url}")
         tmp.replace(path)

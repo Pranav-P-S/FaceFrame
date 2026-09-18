@@ -220,6 +220,21 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
         Add to album
       </button>
       <button
+        className="btn-ghost"
+        onClick={async () => {
+          const hs = await hashes();
+          try {
+            await backend.setLocked(hs, true);
+            showToast({ text: 'Locked — hidden until unlocked', kind: 'info' });
+          } catch {
+            showToast({ text: 'Set a passcode in Settings first', kind: 'error' });
+          }
+          onDone();
+        }}
+      >
+        Lock
+      </button>
+      <button
         className="btn-ghost btn-danger-ghost"
         onClick={async () => {
           const hs = await hashes();

@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS files (
     missing INTEGER NOT NULL DEFAULT 0,
     last_seen REAL,
     added_at REAL NOT NULL DEFAULT 0,
-    trashed_at REAL
+    trashed_at REAL,
+    paired_path TEXT                          -- motion-photo pairing (per path)
 );
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 CREATE INDEX IF NOT EXISTS idx_files_capture ON files(added_at);
@@ -157,15 +158,25 @@ def ensure_schema(conn: sqlite3.Connection, library_root: str | None = None):
     conn.execute("PRAGMA foreign_keys=ON")
     version = _detect_version(conn)
     if version == SCHEMA_VERSION:
+        _add_missing_columns(conn)
         return
     if version == 0:
         _run_ddl(conn)
         _stamp_version(conn)
+        _add_missing_columns(conn)
         return
     if version in (1, 2):
         _migrate_v1_v2_to_v3(conn, library_root)
         return
     raise RuntimeError(f"Unknown index schema version: {version}")
+
+
+def _add_missing_columns(conn: sqlite3.Connection):
+    """Idempotent column additions for indexes created by earlier builds of
+    the same major version. SQLite has no ADD COLUMN IF NOT EXISTS."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
+    if "paired_path" not in existing:
+        conn.execute("ALTER TABLE files ADD COLUMN paired_path TEXT")
 
 
 def _run_ddl(conn: sqlite3.Connection):

@@ -9,6 +9,7 @@ labels, watcher) and plugs in here.
 
 import base64
 import json
+import sqlite3
 import logging
 import shutil
 import sys
@@ -84,7 +85,17 @@ def context(path: str) -> dict:
             ctx = None
         if ctx is None:
             data_dir.mkdir(parents=True, exist_ok=True)
-            store = Store(str(data_dir / "index.db"), library_root=root)
+            try:
+                store = Store(str(data_dir / "index.db"), library_root=root)
+            except sqlite3.DatabaseError as e:
+                raise ValueError(
+                    "index_corrupt: the photo index is unreadable. "
+                    "Use Settings > Clear index to rebuild it (photos are not touched)."
+                ) from e
+            except RuntimeError as e:
+                raise ValueError(
+                    f"index_newer_version: {e}. Install a newer version of FaceFrame."
+                ) from e
             ctx = {
                 "root": root,
                 "store": store,
@@ -170,10 +181,10 @@ def get_shared_processor(provider):
         _shared_processors["auto"] = get_processor("auto")
     shared = _shared_processors["auto"]
     if "cuda" in key and "CUDAExecutionProvider" not in getattr(shared, "providers", []):
-        if key not in _shared_processors:
-            logger.warning("Building a CUDA processor on demand (not at startup)")
-            _shared_processors[key] = get_processor(provider)
-        return _shared_processors[key]
+        # ONNX session construction outside the startup path deadlocks
+        # nondeterministically on Windows — never build on demand; fall back
+        # to the shared engine (the documented CPU-fallback behavior).
+        logger.warning("CUDA requested but not preloaded; using the shared engine")
     return shared
 
 
@@ -273,9 +284,10 @@ def _prime_label_model():
 
 
 def busy_worker():
-    # A watcher pass scans the same library the manual scan would: the two
-    # must not interleave, or each pass's mark_missing flags the other's
-    # newly added files as missing.
+    # Cluster, scan and watcher passes all mutate the same tables (faces in
+    # particular): none of them may interleave with another.
+    if _cluster_thread is not None and _cluster_thread.is_alive():
+        return True
     if _scan_thread is not None and _scan_thread.is_alive():
         return True
     return _watcher.is_busy()
@@ -395,7 +407,7 @@ def _get_feed(req):
         include_locked=bool(req.get("include_locked")),
         include_archived=bool(req.get("include_archived")),
         favorite=req.get("favorite"),
-        limit=int(req.get("limit", 4000)),
+        limit=max(1, min(int(req.get("limit", 4000)), 20000)),
     )
     root = ctx["root"]
     for group in groups:
@@ -518,7 +530,10 @@ def _delete_from_disk(req):
 @action("set_caption")
 def _set_caption(req):
     ctx = locate_library(req["path"])
-    ctx["library"].set_caption(req["hash"], req.get("caption") or "")
+    caption = req.get("caption") or ""
+    if len(caption) > 4000:
+        raise ValueError("Caption too long (max 4000 characters)")
+    ctx["library"].set_caption(req["hash"], caption)
     return {}
 
 
@@ -526,9 +541,16 @@ def _set_caption(req):
 def _set_date_override(req):
     ctx = locate_library(req["path"])
     epoch = req.get("epoch")
-    ctx["library"].set_date_override(
-        req["hash"], float(epoch) if epoch is not None else None
-    )
+    if epoch is not None:
+        epoch = float(epoch)
+        # A poisoned value here lands in every feed row's COALESCE and can
+        # overflow the renderer's time conversion — refuse the extremes
+        # (covers years ~1000-28000).
+        import math
+
+        if not math.isfinite(epoch) or not -3e10 < epoch < 3.5e11:
+            raise ValueError("Date out of supported range")
+    ctx["library"].set_date_override(req["hash"], epoch)
     return {}
 
 
@@ -586,7 +608,9 @@ def _cover_rel(ctx, content_hash):
         return None
     with ctx["store"].connect() as conn:
         row = conn.execute(
-            "SELECT path FROM files WHERE content_hash=? AND missing=0",
+            """SELECT path FROM files
+               WHERE content_hash=? AND missing=0 AND trashed_at IS NULL
+               ORDER BY path LIMIT 1""",
             (content_hash,),
         ).fetchone()
     return row[0] if row else None
@@ -881,14 +905,19 @@ def _get_places(req):
     import places as places_mod
 
     ctx = locate_library(req["path"])
-    groups = places_mod.place_groups(ctx["store"], precision=req.get("precision", 4))
+    try:
+        precision = int(req.get("precision", 4))
+    except (TypeError, ValueError):
+        precision = 4
+    precision = max(2, min(precision, 12))  # geohash max meaningful = 12
+    groups = places_mod.place_groups(ctx["store"], precision=precision)
     for group in groups:
         group["cover"] = _abs(ctx, _cover_rel(ctx, group["cover_hash"]))
         group["items"] = [_abs(ctx, p) for p in group["items"]]
     # Geocoding must never stall the command loop: cached names come back
     # immediately; uncached cells are filled politely in the background
     # (rate-limited, capped per pass) and announced with an event.
-    if req.get("geocode") and ctx["store"].get_meta("setting_geocode", "1") == "1":
+    if req.get("geocode") and ctx["store"].get_meta("setting_geocode", "0") == "1":
         threading.Thread(
             target=_geocode_worker, args=(ctx, groups), daemon=True, name="geocode"
         ).start()
@@ -973,6 +1002,118 @@ def _resolve_missing(req):
         ctx["store"].remove_file(rel)
         removed += 1
     return {"removed": removed}
+
+
+@action("check_index")
+def _check_index(req):
+    """Integrity self-check: sqlite health, orphans, missing thumbnails,
+    full-text drift. repair=true runs the existing self-healing sweeps."""
+    ctx = locate_library(req["path"])
+    report = {}
+    with ctx["store"].connect() as conn:
+        report["integrity"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        report["orphan_media"] = conn.execute(
+            """SELECT COUNT(*) FROM media
+               WHERE content_hash NOT IN
+                 (SELECT DISTINCT content_hash FROM files
+                  WHERE content_hash IS NOT NULL)"""
+        ).fetchone()[0]
+        report["missing_thumbs"] = 0
+        thumbs = ctx["store"].referenced_face_thumbs()
+        root = Path(ctx["root"])
+        for rel in thumbs:
+            if not (root / rel).is_file():
+                report["missing_thumbs"] += 1
+        report["fts_rows"] = conn.execute(
+            "SELECT COUNT(*) FROM fts_map"
+        ).fetchone()[0]
+        report["live_files"] = conn.execute(
+            """SELECT COUNT(*) FROM files
+               WHERE missing=0 AND trashed_at IS NULL"""
+        ).fetchone()[0]
+    report["fts_drift"] = max(0, report["live_files"] - report["fts_rows"])
+    if req.get("repair"):
+        ctx["store"].prune_orphan_media()
+        ctx["store"].sync_fts()
+        report["repaired"] = True
+    return {"report": report}
+
+
+@action("backup_index")
+def _backup_index(req):
+    """Consistent backup of the irreplaceable parts of the index: the
+    database (snapshotted via sqlite's backup API, safe under WAL) and face
+    thumbnails (not regenerable without re-inference). Regenerable caches
+    (previews/posters/creations) are excluded."""
+    import sqlite3 as _sq
+    import zipfile
+
+    ctx = locate_library(req["path"])
+    dest = req.get("dest")
+    if not dest:
+        raise ValueError("Missing dest")
+    dest_path = Path(dest)
+    dest_path.mkdir(parents=True, exist_ok=True)
+    data_dir = Path(ctx["root"]) / DATA_DIR_NAME
+    stamp = time.strftime("%Y%m%d")
+    out = dest_path / f"{Path(ctx['root']).name}-{stamp}.faceframe.zip"
+
+    snapshot = data_dir / "index.snapshot.db"
+    with _sq.connect(str(data_dir / "index.db")) as src, _sq.connect(str(snapshot)) as dst:
+        src.backup(dst)
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(snapshot, "index.db")
+            thumbs = data_dir / "thumbnails"
+            for f in sorted(thumbs.rglob("*")) if thumbs.is_dir() else []:
+                if f.is_file():
+                    zf.write(f, f"thumbnails/{f.relative_to(thumbs)}")
+            zf.writestr(
+                "meta.json",
+                json.dumps({
+                    "schema_version": 3,
+                    "created": time.time(),
+                    "library": ctx["root"],
+                }),
+            )
+    finally:
+        snapshot.unlink(missing_ok=True)
+    return {"path": str(out), "bytes": out.stat().st_size}
+
+
+@action("restore_index")
+def _restore_index(req):
+    """Swap in a previously backed-up index. Guarded by the busy check like
+    every mutating action, and refuses paths outside the library folder."""
+    import zipfile
+
+    ctx = locate_library(req["path"])
+    src = Path(req.get("src") or "")
+    if not src.is_file():
+        raise ValueError("Backup file not found")
+    if busy_worker():
+        raise RuntimeError("Another operation is still running")
+    data_dir = Path(ctx["root"]) / DATA_DIR_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(src) as zf:
+        names = zf.namelist()
+        if "index.db" not in names:
+            raise ValueError("Not a FaceFrame index backup")
+        # Replace, don't merge: the backup is a full index snapshot.
+        for rel in ("index.db", "index.db-wal", "index.db-shm"):
+            target = data_dir / rel
+            if target.exists():
+                target.unlink()
+        zf.extract("index.db", data_dir)
+        for name in names:
+            if name.startswith("thumbnails/"):
+                out = data_dir / name
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(name) as fsrc, open(out, "wb") as fdst:
+                    fdst.write(fsrc.read())
+    _contexts.pop(ctx["root"], None)
+    emit({"event": "index_restored", "path": ctx["root"]})
+    return {"restored": True}
 
 
 @action("get_storage_stats")
@@ -1091,9 +1232,9 @@ def _set_settings(req):
 def _set_watch(req):
     ctx = locate_library(req["path"])
     ctx["store"].set_meta("setting_watch", "1" if req.get("enabled") else "0")
-    if req.get("interval"):
-        ctx["store"].set_meta("setting_watch_interval", str(req["interval"]))
-    _watcher.set_enabled(bool(req.get("enabled")), float(req.get("interval") or 30))
+    interval = max(5.0, min(float(req.get("interval") or 30), 3600.0))
+    ctx["store"].set_meta("setting_watch_interval", str(interval))
+    _watcher.set_enabled(bool(req.get("enabled")), interval)
     return {"enabled": bool(req.get("enabled"))}
 
 
@@ -1102,24 +1243,41 @@ def _set_watch(req):
 # ---------------------------------------------------------------------------
 
 def _watch_pass():
-    if busy_worker():
-        return
-    for ctx in list(_contexts.values()):
-        if (ctx["store"].get_meta("setting_watch", "0") != "1"):
-            continue
-        try:
-            processor = get_shared_processor("auto")
-            processor.thumbnail_dir = str(Path(ctx["root"]) / DATA_DIR_NAME / "thumbnails")
-            ScanPipeline(
-                str(Path(ctx["root"]) / DATA_DIR_NAME / "index.db"),
-                ctx["root"],
-                face_engine=processor,
-                labeler=_make_labeler(ctx),
-                emit=ProgressCoalescer(path=ctx["root"]),
-            ).run()
-            ctx["library"].purge_expired_trash()
-        except Exception:
-            logger.exception("Watch pass failed for %s", ctx["root"])
+    global _scan_thread
+    # Claim the same lifecycle lock the manual scan uses, so a watcher pass
+    # can never interleave with a manual scan (or vice versa). Registering
+    # this thread as _scan_thread makes busy_worker() cover it everywhere.
+    with _lifecycle_lock:
+        if busy_worker():
+            return
+        _scan_thread = threading.current_thread()
+    try:
+        for ctx in list(_contexts.values()):
+            if (ctx["store"].get_meta("setting_watch", "0") != "1"):
+                continue
+            try:
+                processor = get_shared_processor("auto")
+                processor.thumbnail_dir = str(Path(ctx["root"]) / DATA_DIR_NAME / "thumbnails")
+                pipeline = ScanPipeline(
+                    str(Path(ctx["root"]) / DATA_DIR_NAME / "index.db"),
+                    ctx["root"],
+                    face_engine=processor,
+                    labeler=_make_labeler(ctx),
+                    emit=ProgressCoalescer(path=ctx["root"]),
+                )
+                pipeline.abort_check = _abort_scan.is_set
+                _abort_scan.clear()
+                stats = pipeline.run()
+                ctx["library"].purge_expired_trash()
+                if not stats.get("cancelled"):
+                    emit({"event": "scan_complete", "path": ctx["root"], **stats})
+                else:
+                    emit({"event": "scan_cancelled", "path": ctx["root"]})
+            except Exception:
+                logger.exception("Watch pass failed for %s", ctx["root"])
+    finally:
+        with _lifecycle_lock:
+            _scan_thread = None
 
 
 from watcher import Watcher  # noqa: E402  (needs the helpers above)
@@ -1213,6 +1371,15 @@ def _warm_heavy_imports():
 
 
 def main():
+    # Force UTF-8 stdio: default Windows pipe encoding is a legacy code page,
+    # which mojibakes every non-ASCII caption/name and can crash readline on
+    # undefined bytes (a crash loop, since the host restarts us).
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     logger.info("Backend started (v3)")
     # Announce BEFORE the heavy chain: on first run this imports the models
     # and can download hundreds of MB, so the host must know we are alive

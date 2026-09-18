@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { rememberHashes } from '../lib/store';
 import type { Item } from '../types';
 import { justifyRows, visibleRows } from '../lib/layout';
 import { groupLabel, monthKey, yearKey } from '../lib/format';
-import { useStore } from '../lib/store';
+import { useStore, rememberHashes } from '../lib/store';
 import Thumb from './Thumb';
 
 export type GridView = 'days' | 'months' | 'years';
@@ -26,6 +25,7 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
   const toggleSelect = useStore((s) => s.toggleSelect);
   const selectRange = useStore((s) => s.selectRange);
   const route = useStore((s) => s.route);
+  const selectAll = useStore((s) => s.selectAll);
   const selectMode = route.page !== 'photos' || selection.size > 0;
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -111,6 +111,7 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
     if (el) setViewportH(el.clientHeight);
   }, [width]);
 
+
   const [first, last] = visibleRows(rowsLayout.rows, scrollTop, viewportH);
 
   const flatPaths = useMemo(
@@ -129,6 +130,20 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
   useEffect(() => {
     rememberHashes(flatItems.map((i) => [i.path, i.content_hash] as [string, string]));
   }, [flatItems]);
+
+  // Ctrl+A selects the whole flattened view (GP parity).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+        e.preventDefault();
+        selectAll(flatPaths);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [flatPaths, selectAll]);
 
   return (
     <div className="grid-scroll" ref={containerRef} onScroll={onScroll}>

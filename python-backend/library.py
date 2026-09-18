@@ -266,7 +266,8 @@ class LibraryService:
                           COALESCE(m.date_override, m.capture_time, f.mtime) AS ts
                    FROM files f
                    JOIN media m ON m.content_hash=f.content_hash
-                   WHERE f.trashed_at IS NULL AND COALESCE(m.locked,0)=1"""
+                   WHERE f.trashed_at IS NULL AND f.missing=0
+                     AND COALESCE(m.locked,0)=1"""
             ).fetchall()
 
     # ---------------------------------------------------------------- albums

@@ -79,6 +79,21 @@ function AlbumDetail({ albumId }: { albumId: number }) {
       <div className="page-head">
         <a className="crumb" href="#/albums">← Albums</a>
         <h1 className="page-title">{album.name}</h1>
+        <label className="setting-row album-sort">
+          <span className="info-muted">Sort</span>
+          <select
+            value={album.sort_key}
+            onChange={async (e) => {
+              await backend.setAlbumSort(albumId, e.target.value);
+              const res = await backend.getAlbum(albumId);
+              setAlbum(res.album as AlbumDetail);
+            }}
+          >
+            <option value="added">Manually / date added</option>
+            <option value="captured">Date captured</option>
+            <option value="filename">Filename</option>
+          </select>
+        </label>
         {selection.size > 0 && (
           <button className="btn-ghost btn-danger-ghost" onClick={() => void removeSelected()}>
             Remove {selection.size} from album

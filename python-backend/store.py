@@ -186,7 +186,8 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT f.path, f.content_hash, f.kind, f.size, f.mtime,
-                          f.missing, f.added_at, m.analysis_state
+                          f.missing, f.added_at, f.paired_path,
+                          m.analysis_state
                    FROM files f LEFT JOIN media m
                      ON m.content_hash = f.content_hash"""
             ).fetchall()
@@ -196,7 +197,7 @@ class Store:
         with self.connect() as conn:
             return conn.execute(
                 """SELECT path, content_hash, kind, size, mtime, missing, added_at,
-                          trashed_at
+                          trashed_at, paired_path
                    FROM files WHERE path=?""",
                 (path,),
             ).fetchone()
@@ -297,6 +298,29 @@ class Store:
                        WHERE thumbnail_path IS NOT NULL"""
                 )
             ]
+
+    def set_motion_pairs(self, updates: list, seen_paths: set | None = None):
+        """Write (path, paired_path) rows for this pass's motion pairs and
+        clear pairings whose sibling vanished (recomputed from scratch every
+        pass, so a stale pair never survives its sibling)."""
+        with self.connect() as conn:
+            conn.executemany(
+                "UPDATE files SET paired_path=? WHERE path=?",
+                [(pair, path) for path, pair in updates],
+            )
+            if seen_paths:
+                update_paths = {path for path, _ in updates}
+                stale = [
+                    (path,)
+                    for (path,) in conn.execute(
+                        """SELECT path FROM files
+                           WHERE paired_path IS NOT NULL"""
+                    )
+                    if path in seen_paths and path not in update_paths
+                ]
+                conn.executemany(
+                    "UPDATE files SET paired_path=NULL WHERE path=?", stale
+                )
 
     def mark_missing(self, seen_paths: set) -> int:
         """Flag indexed files not seen in this pass; never auto-delete.

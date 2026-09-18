@@ -319,11 +319,14 @@ def test_motion_pair_links_and_feed_shows_photo_once(factory):
     _write_video(root / "IMG_0001.mp4")
     pipeline = make(faces=0)
     pipeline.run()
-    by_path = hashes_by_path(pipeline.store)
-    photo_flags = media_flags(pipeline.store, by_path["IMG_0001.jpg"])
-    video_flags = media_flags(pipeline.store, by_path["IMG_0001.mp4"])
-    assert photo_flags["motion"] == "IMG_0001.mp4"
-    assert video_flags["motion_pair"] == "IMG_0001.jpg"
+    def paired_of(path):
+        with pipeline.store.connect() as conn:
+            return conn.execute(
+                "SELECT paired_path FROM files WHERE path=?", (path,)
+            ).fetchone()[0]
+
+    assert paired_of("IMG_0001.jpg") == "IMG_0001.mp4"
+    assert paired_of("IMG_0001.mp4") == "IMG_0001.jpg"
 
     from views import feed_groups
 
@@ -341,8 +344,10 @@ def test_motion_pair_stale_flag_clears_when_video_deleted(factory):
 
     (root / "IMG_0001.mp4").unlink()
     pipeline.run()
-    by_path = hashes_by_path(pipeline.store)
-    assert "motion" not in media_flags(pipeline.store, by_path["IMG_0001.jpg"])
+    with pipeline.store.connect() as conn:
+        assert conn.execute(
+            "SELECT paired_path FROM files WHERE path='IMG_0001.jpg'"
+        ).fetchone()[0] is None
 
     from views import feed_groups
 

@@ -17,6 +17,7 @@ import UtilitiesPage from './components/pages/UtilitiesPage';
 import SettingsPage from './components/pages/SettingsPage';
 import ExplorePage from './components/pages/ExplorePage';
 import Welcome from './components/Welcome';
+import CommandPalette from './components/CommandPalette';
 import Viewer from './components/Viewer';
 
 export default function App() {
@@ -105,16 +106,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
   // Global shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
       if (e.key === '/') {
         e.preventDefault();
         document.querySelector<HTMLInputElement>('[data-search-input]')?.focus();
       } else if (e.key === '?' ) {
-        showToast({ text: 'Shortcuts — / search · ←→ navigate · f favorite · i info · Del trash · Esc close', kind: 'info' });
+        showToast({ text: 'Shortcuts — Ctrl+K palette · / search · ←→ navigate · f favorite · i info · Del trash · Esc close', kind: 'info' });
       }
     };
     window.addEventListener('keydown', onKey);
@@ -176,6 +184,8 @@ export default function App() {
       {viewer && viewer.items[viewer.index] && (
         <Viewer items={viewer.items} index={viewer.index} />
       )}
+
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
 
       {!libraryPath && !mocked && <Welcome onPicked={(p) => setLibraryPath(p)} />}
 

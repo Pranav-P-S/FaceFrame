@@ -344,49 +344,28 @@ class ScanPipeline:
         return self.store.mark_missing(seen_paths)
 
     def _link_motion_pairs(self, seen_paths: set):
-        """Motion photos: a video sharing a photo's basename (IMG_0123.jpg +
-        IMG_0123.mp4). The photo grows a ``motion`` flag pointing at the
-        video; the video is marked ``motion_pair`` so the feed shows the pair
-        once, with a play affordance on the photo — never as two items.
-        Pairings are recomputed every pass, so a deleted sibling clears the
-        survivor's stale flag instead of pointing at a ghost file."""
-        photo_stems: dict[str, str] = {}
-        video_by_stem: dict[str, str] = {}
+        """Motion photos: a video sharing a photo's basename IN THE SAME
+        FOLDER (IMG_0123.jpg + IMG_0123.mp4). Pairing is a property of the
+        PATH, so it lives on the files row (paired_path) and is recomputed
+        deterministically every pass — same-content copies elsewhere never
+        inherit or wipe a pairing, and a deleted sibling clears the survivor
+        because the pairing is rebuilt from scratch."""
+        groups: dict[tuple[str, str], dict[str, str]] = {}
         for rel_path in seen_paths:
-            suffix = Path(rel_path).suffix.lower()
-            stem = Path(rel_path).stem.lower()
+            rel = Path(rel_path)
+            suffix = rel.suffix.lower()
+            key = (str(rel.parent).lower(), rel.stem.lower())
+            entry = groups.setdefault(key, {"photo": "", "video": ""})
             if suffix in IMAGE_EXTENSIONS:
-                photo_stems.setdefault(stem, rel_path)
+                entry["photo"] = entry["photo"] or rel_path
             elif suffix in VIDEO_EXTENSIONS:
-                video_by_stem.setdefault(stem, rel_path)
-        for stem, photo_rel in photo_stems.items():
-            self._merge_flag(photo_rel, {"motion": video_by_stem.get(stem)})
-        for stem, video_rel in video_by_stem.items():
-            self._merge_flag(video_rel, {"motion_pair": photo_stems.get(stem)})
-
-    def _merge_flag(self, rel_path: str, extra: dict):
-        state = self.store.get_file_state(rel_path)
-        if not state or not state["content_hash"]:
-            return
-        media = self.store.get_media(state["content_hash"])
-        if not media:
-            return
-        try:
-            flags = json_loads(media["flags"]) if media["flags"] else {}
-        except Exception:
-            flags = {}
-        if all(flags.get(k) == v for k, v in extra.items()):
-            return
-        for key, value in extra.items():
-            if value is None:
-                flags.pop(key, None)  # pairing ended: drop the stale flag
-            else:
-                flags[key] = value
-        self.store.upsert_media(
-            {"content_hash": media["content_hash"], "flags": _dumps(flags)}
-        )
-
-    # ------------------------------------------------------------------ gc
+                entry["video"] = entry["video"] or rel_path
+        updates = []
+        for entry in groups.values():
+            if entry["photo"] and entry["video"]:
+                updates.append((entry["video"], entry["photo"]))
+                updates.append((entry["photo"], entry["video"]))
+        self.store.set_motion_pairs(updates, seen_paths)
 
     def gc_caches(self) -> int:
         """Delete cache files the index no longer references. Idempotent."""

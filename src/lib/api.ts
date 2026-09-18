@@ -40,6 +40,7 @@ export const backend = {
   albumAdd: (albumId: number, hashes: string[]) => call('album_add', { album_id: albumId, hashes }),
   albumRemove: (albumId: number, hashes: string[]) => call('album_remove', { album_id: albumId, hashes }),
   getAlbum: (albumId: number) => call('get_album', { album_id: albumId }),
+  setAlbumSort: (albumId: number, sort: string) => call('set_album_sort', { album_id: albumId, sort }),
 
   getPersons: (path: string) => call('get_persons', { path }),
   getUnclustered: (path: string) => call('get_unclustered', { path }),

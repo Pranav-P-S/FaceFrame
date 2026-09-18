@@ -55,10 +55,11 @@ def _base_items(
 ) -> list:
     sql = """
         SELECT f.path, f.content_hash, f.kind, f.added_at,
+               f.paired_path AS motion,
                COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
-               m.favorite, m.archived, m.locked, m.caption, m.poster_path,
-               m.flags, m.labels
+               m.favorite, m.archived, m.locked, m.caption, m.flags,
+               m.labels
         FROM files f JOIN media m ON m.content_hash = f.content_hash
         WHERE f.missing=0 AND f.trashed_at IS NULL
     """
@@ -72,7 +73,9 @@ def _base_items(
         params.append(1 if favorite else 0)
     if archived_only:
         sql += " AND COALESCE(m.archived,0)=1"
-    sql += _motion_pair_filter()
+    # Motion-pair videos hide behind their photo; photos keep showing
+    # (with the paired video reachable for playback).
+    sql += " AND NOT (m.kind='video' AND f.paired_path IS NOT NULL)"
     sql += extra_where
     sql += " ORDER BY ts DESC, f.path LIMIT ?"
     params.append(int(limit))
@@ -92,13 +95,6 @@ def _labels(raw):
         return json.loads(raw)
     except (TypeError, ValueError):
         return []
-
-
-def _motion_pair_filter() -> str:
-    return (
-        " AND NOT (m.kind='video' AND m.flags IS NOT NULL"
-        " AND m.flags LIKE '%motion_pair%')"
-    )
 
 
 def _flags(raw):
@@ -149,10 +145,11 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
     include_trashed = "trashed" in parsed.get("is")
     base_sql = """
         SELECT f.path, f.content_hash, f.kind,
+               f.paired_path AS motion,
                COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
-               m.favorite, m.archived, m.locked, m.caption, m.poster_path,
-               m.flags
+               m.favorite, m.archived, m.locked, m.caption, m.flags,
+               m.labels
         FROM files f JOIN media m ON m.content_hash = f.content_hash
         WHERE f.missing=0
     """
@@ -211,8 +208,10 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
             where.append("0=1")
 
     for value in parsed.get("folder"):
-        where.append("f.path LIKE ?")
-        params.append(f"{value.strip('/').replace(chr(92), '/')}%")
+        # Match the folder boundary: folder:sub must not hit submissions/.
+        folder = value.strip("/").replace(chr(92), "/")
+        where.append("(f.path LIKE ? OR f.path LIKE ?)")
+        params.extend([f"{folder}/%", f"{folder} %"])
 
     for value in parsed.get("after"):
         epoch = _date_to_epoch(value, start=True)
@@ -229,10 +228,21 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
     sql = base_sql
     for clause in where:
         sql += f" AND {clause}"
-    sql += _motion_pair_filter()
+    sql += " AND NOT (m.kind='video' AND f.paired_path IS NOT NULL)"
     if text_hashes is not None:
-        sql += f" AND f.content_hash IN ({','.join('?' * len(text_hashes))})"
-        params.extend(text_hashes)
+        if include_trashed:
+            # FTS only indexes live rows; for trash searches fall back to a
+            # direct LIKE over caption/path so is:trashed + text still works.
+            terms = parsed.text
+            clause = " OR ".join(
+                "(COALESCE(m.caption,'') LIKE ? OR f.path LIKE ?)" for _ in terms
+            )
+            sql += f" AND ({clause})"
+            like = [f"%{t}%" for t in terms for _ in range(2)]
+            params.extend(like)
+        else:
+            sql += f" AND f.content_hash IN ({','.join('?' * len(text_hashes))})"
+            params.extend(text_hashes)
     sql += " ORDER BY ts DESC, f.path LIMIT 5000"
 
     with store.connect() as conn:

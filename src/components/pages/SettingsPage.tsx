@@ -27,7 +27,7 @@ export default function SettingsPage() {
         const raw = (res.settings as Record<string, string | null>) ?? {};
         setSettings({
           setting_labels: raw.setting_labels ?? '1',
-          setting_geocode: raw.setting_geocode ?? '1',
+          setting_geocode: raw.setting_geocode ?? '0',
           setting_watch: raw.setting_watch ?? '0',
         });
       });
@@ -98,7 +98,7 @@ export default function SettingsPage() {
         {(
           [
             ['setting_labels', 'Things labels (downloads a 14 MB model once)'],
-            ['setting_geocode', 'Reverse geocoding for place names (online, cached)'],
+            ['setting_geocode', 'Reverse geocoding for place names (online, cached, off by default)'],
             ['setting_watch', 'Watch mode — rescan every 30 s while running'],
           ] as const
         ).map(([key, label]) => (

@@ -149,12 +149,35 @@ def export_baked(
     if img is None:
         raise ValueError("Undecodable source")
     img = _apply_edit(img, edit)
-    params = [cv2.IMWRITE_JPEG_QUALITY, 92]
-    ok, buf = cv2.imencode(".jpg", img, params)
+    # Encode in the SOURCE's format: edited PNG/TIFF must not be written as
+    # JPEG bytes under a .png name.
+    suffix = dest.suffix.lower()
+    if suffix in (".png", ".tif", ".tiff", ".webp", ".bmp"):
+        ok, buf = cv2.imencode(suffix, img)
+    else:
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
     if not ok:
         raise ValueError("Encode failed")
+    # Never silently overwrite a previous export of a different item.
+    stem, ext = dest.stem, dest.suffix
+    counter = 1
+    while dest.exists() and _differs(dest):
+        dest = dest.with_name(f"{stem} ({counter}){ext}")
+        counter += 1
     buf.tofile(str(dest))
     return str(dest)
+
+
+def _differs(path: Path) -> bool:
+    """True when an existing export file is not a previous export of this
+    same item (name-collision with an unrelated file)."""
+    try:
+        jpeg, png, tiff_le, tiff_be, bmp = b"\xff\xd8", b"\x89P", b"II", b"MM", b"BM"
+        return path.stat().st_size > 0 and path.read_bytes()[:2] not in (
+            jpeg, png, tiff_le, tiff_be, bmp,
+        )
+    except OSError:
+        return False
 
 
 # ------------------------------------------------------------------ edits

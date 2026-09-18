@@ -30,7 +30,10 @@ export default function PlacesPage() {
 function PlaceCard({ place }: { place: PlaceGroup }) {
   const url = useImage(place.cover, 384, true);
   return (
-    <a className="album-card" href={`#/search?q=place:${place.name ?? place.geohash}`}>
+    <a
+      className="album-card"
+      href={`#/search?q=${encodeURIComponent('place:"' + (place.name ?? place.geohash) + '"')}`}
+    >
       <div className="album-cover">{url && <img src={url} alt="" />}</div>
       <div className="album-meta">
         <strong>{place.name ?? place.geohash}</strong>

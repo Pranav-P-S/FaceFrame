@@ -55,7 +55,7 @@ function registerAppProtocol() {
       let rel = decodeURIComponent(pathname).replace(/^\/+/, '');
       if (!rel) rel = 'index.html';
       const filePath = path.normalize(path.join(distDir, rel));
-      if (!filePath.startsWith(distDir)) {
+      if (filePath !== distDir && !filePath.startsWith(distDir + path.sep)) {
         return new Response('Forbidden', { status: 403 });
       }
       return net.fetch(pathToFileURL(filePath).toString());
@@ -70,7 +70,31 @@ function registerAppProtocol() {
 // media:// — range-capable streaming of originals for <video>
 // ---------------------------------------------------------------------------
 
+// Media roots are ONLY the folders the user picked in the OS folder dialog
+// (plus their persisted history). open_library/scan with a raw renderer path
+// does not grant streaming rights — that call can name any directory.
 const mediaRoots = new Set();
+const mediaRootsFile = () =>
+  path.join(app.getPath('userData'), 'media-roots.json');
+
+function loadMediaRoots() {
+  try {
+    for (const root of JSON.parse(fs.readFileSync(mediaRootsFile(), 'utf8'))) {
+      mediaRoots.add(path.normalize(root));
+    }
+  } catch {
+    // first run / unreadable — start empty
+  }
+}
+
+function persistMediaRoots() {
+  try {
+    fs.mkdirSync(path.dirname(mediaRootsFile()), { recursive: true });
+    fs.writeFileSync(mediaRootsFile(), JSON.stringify([...mediaRoots], null, 1));
+  } catch (e) {
+    console.error('could not persist media roots:', e);
+  }
+}
 
 // Only real media files are ever streamed — a compromised renderer must not
 // be able to read documents through the scheme.
@@ -154,7 +178,10 @@ function registerMediaProtocol() {
 }
 
 function addMediaRoot(folder) {
-  if (folder) mediaRoots.add(path.normalize(folder));
+  if (folder) {
+    mediaRoots.add(path.normalize(folder));
+    persistMediaRoots();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,10 +315,11 @@ function startPythonBackend() {
       }
 
       const scriptPath = backendScriptPath();
-      pythonProcess = spawn(pythonPath, [scriptPath], {
+      pythonProcess = spawn(pythonPath, ['-X', 'utf8', scriptPath], {
         cwd: path.dirname(scriptPath),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        env: { ...process.env, PYTHONUTF8: '1' },
       });
       backendStarting = false;
 
@@ -439,50 +467,35 @@ function requireBackend() {
 // ---------------------------------------------------------------------------
 
 function registerIpc() {
-  ipcMain.handle('select-folder', async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose a photo folder',
-      properties: ['openDirectory'],
-    });
-    return result.canceled || result.filePaths.length === 0
-      ? null
-      : result.filePaths[0];
-  });
-
-  // open_library/scan name a library folder; once the backend confirms the
-  // folder is real, the main process registers it as a media root. Roots are
-  // therefore only ever backend-verified paths — never raw renderer input.
-  const LIBRARY_ACTIONS = new Set(['open_library', 'scan']);
-
   const passThrough = (channel, mapArgs) =>
     ipcMain.handle(channel, (_event, ...args) => {
       requireBackend();
       const message = mapArgs(...args);
       message.id = nextRequestId++;
-      const folder =
-        LIBRARY_ACTIONS.has(message.action) && typeof message.path === 'string'
-          ? message.path
-          : null;
-      return sendToPython(message).then((result) => {
-        if (folder) addMediaRoot(folder);
-        return result;
-      });
+      return sendToPython(message);
     });
 
   // Generic surface: request('action', params). Kept alongside the named
-  // channels so older call sites keep working.
+  // channels so older call sites keep working. NOTE: these calls never
+  // grant media:// rights — only the select-folder dialog does.
   ipcMain.handle('backend-request', (_event, action, params) => {
     requireBackend();
     const message = { action, ...(params || {}) };
     message.id = nextRequestId++;
-    const folder =
-      LIBRARY_ACTIONS.has(action) && typeof message.path === 'string'
-        ? message.path
-        : null;
-    return sendToPython(message).then((result) => {
-      if (folder) addMediaRoot(folder);
-      return result;
+    return sendToPython(message);
+  });
+
+  ipcMain.handle('select-folder', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a photo folder',
+      properties: ['openDirectory'],
     });
+    if (!result.canceled && result.filePaths.length > 0) {
+      addMediaRoot(result.filePaths[0]);
+    }
+    return result.canceled || result.filePaths.length === 0
+      ? null
+      : result.filePaths[0];
   });
 
   passThrough('get-providers', () => ({ action: 'get_providers' }));
@@ -613,6 +626,7 @@ if (!gotLock) {
   });
 
   app.whenReady().then(() => {
+    loadMediaRoots();
     if (!isDev) registerAppProtocol();
     registerMediaProtocol();
     registerIpc();

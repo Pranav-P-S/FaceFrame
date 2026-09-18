@@ -30,8 +30,9 @@ gone.
   (`person:Alice`), labels ("things": `dog`, `beach`), places
   (`place:Paris`), types (`type:video`, `is:favorite`, `year:2024`), with
   filter chips.
-- **Places & memories** — GPS clustering into places (optional, cached,
-  toggleable reverse geocoding), "on this day", trips and highlights builders.
+- **Places & memories** — GPS clustering into places (optional reverse
+  geocoding via Nominatim: OFF by default, opt in from Settings; cached,
+  rate-limited), "on this day", trips and highlights builders.
 - **Library care** — albums (cover, sort, reorder), trash with 60-day
   retention that ends in the OS Recycle Bin (never a hard delete), archive,
   a passcode-gated locked folder, exact-duplicate review, missing-file
@@ -176,7 +177,9 @@ docs/                feature analysis, architecture critique, spec
 - No RAW decoding, no video trimming/re-encoding, no auto-movies, no cloud
   anything (backup, sharing links, comments) — the app is local by design.
 - The locked folder hides items from FaceFrame's views behind a passcode; it
-  does not encrypt files on disk (the UI says so).
+  does not encrypt files on disk and is not a backend security boundary (the
+  UI says so — treat it as anti-shoulder-surfing). `.faceframe` also stores
+  face embeddings and crops in plaintext; deleting a library removes them.
 - Pets are not detected (the face model is human-only). "Things" labels come
   from an ImageNet classifier — broad categories, not fine-grained scenes.
 - Very small faces (under ~28 px) are skipped by the detector; abstract
