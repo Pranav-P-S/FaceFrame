@@ -284,3 +284,24 @@ def test_capture_time_from_exif(scan, tmp_path):
     assert exif["camera"] == "TestCam X100"
     assert abs(exif["gps"][0] - 41.383333) < 0.001
     assert abs(exif["gps"][1] - 2.15) < 0.001
+
+
+def test_move_does_not_create_missing_ghosts(scan):
+    """Stress finding: moving files used to leave permanent missing=1 ghosts
+    even though the content was cleanly relinked at the new path."""
+    pipeline, root, engine = scan()
+    pipeline.run()
+    (root / "sub_move").mkdir()
+    moved = 0
+    for p in sorted(root.glob("photo_*.jpg")):
+        p.rename(root / "sub_move" / p.name)
+        moved += 1
+    stats = pipeline.run()
+    assert stats["missing_now"] == 0, stats
+    assert stats["decoded"] == 0
+    with pipeline.store.connect() as conn:
+        missing = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE missing=1"
+        ).fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+    assert missing == 0 and total == moved + 1  # + nested.jpg

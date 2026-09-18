@@ -149,6 +149,14 @@ class Store:
                 (path, content_hash, kind, size, mtime,
                  time.time(), added_at if added_at is not None else time.time()),
             )
+            # A live row for content H means any missing ghost of H was a
+            # move, not a deletion: the old path row must not linger in the
+            # missing list forever.
+            conn.execute(
+                """DELETE FROM files
+                   WHERE content_hash=? AND missing=1 AND path != ?""",
+                (content_hash, path),
+            )
 
     def remove_file(self, path: str):
         """Drop a file row; GC the media row if it lost its last reference."""
@@ -218,6 +226,19 @@ class Store:
         if old_hash == new_hash:
             return
         with self.connect() as conn:
+            # The new content usually has no media row yet (it is about to be
+            # processed): seed it with the old row's user-owned columns or
+            # the UPDATE below is a no-op and favorite/caption are lost.
+            # analysis_state is deliberately NOT carried — the new bytes
+            # still need a full decode.
+            conn.execute(
+                """INSERT INTO media (content_hash, caption, edit, date_override,
+                                      favorite, archived, locked)
+                   SELECT ?, caption, edit, date_override, favorite, archived, locked
+                   FROM media WHERE content_hash=?
+                   ON CONFLICT(content_hash) DO NOTHING""",
+                (new_hash, old_hash),
+            )
             conn.execute(
                 """UPDATE media SET
                        caption=(SELECT caption FROM media WHERE content_hash=?),
@@ -279,17 +300,41 @@ class Store:
 
     def mark_missing(self, seen_paths: set) -> int:
         """Flag indexed files not seen in this pass; never auto-delete.
+        A vanished path whose content is still alive at another path is a
+        MOVE: its ghost row is removed instead of being flagged missing.
         Creations live inside .faceframe (outside the walk) by design."""
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT path, missing FROM files WHERE missing=0 AND kind != 'creation'"
+                """SELECT path, content_hash FROM files
+                   WHERE missing=0 AND kind != 'creation'"""
             ).fetchall()
             gone = [r["path"] for r in rows if r["path"] not in seen_paths]
-            conn.executemany(
-                "UPDATE files SET missing=1 WHERE path=?",
-                [(p,) for p in gone],
-            )
-            return len(gone)
+            moved = []
+            really_gone = []
+            for path in gone:
+                content_hash = next(
+                    (r["content_hash"] for r in rows if r["path"] == path), None
+                )
+                if content_hash:
+                    live_elsewhere = conn.execute(
+                        """SELECT COUNT(*) FROM files
+                           WHERE content_hash=? AND missing=0 AND path != ?""",
+                        (content_hash, path),
+                    ).fetchone()[0]
+                    if live_elsewhere:
+                        moved.append(path)
+                        continue
+                really_gone.append(path)
+            if moved:
+                conn.executemany(
+                    "DELETE FROM files WHERE path=?", [(p,) for p in moved]
+                )
+            if really_gone:
+                conn.executemany(
+                    "UPDATE files SET missing=1 WHERE path=?",
+                    [(p,) for p in really_gone],
+                )
+            return len(really_gone)
 
     # -- full-text ---------------------------------------------------------
 

@@ -117,6 +117,10 @@ export const useStore = create<AppState>((set, get) => ({
   showToast: (toast) => set({ toast }),
 }));
 
+if (typeof window !== 'undefined') {
+  (window as unknown as { __ffstore: unknown }).__ffstore = useStore;
+}
+
 window.addEventListener('hashchange', () => {
   useStore.setState({ route: parseHash(window.location.hash) });
 });

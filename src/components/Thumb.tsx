@@ -64,6 +64,9 @@ export default function Thumb({ item, height, selected, selectMode, onOpen, onSe
           <span className="thumb-duration">{formatDuration(item.duration)}</span>
         </>
       )}
+      {/* Motion stills keep their embedded clip one tap away, mirroring the
+          backend's promise that the pair shows once with a play affordance. */}
+      {flagged?.motion ? <span className="thumb-play" aria-hidden>▶</span> : null}
       {flagged?.panorama ? <span className="thumb-badge">pano</span> : null}
       {selected && <span className="thumb-check" aria-hidden>✓</span>}
     </button>

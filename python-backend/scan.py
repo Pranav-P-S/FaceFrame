@@ -111,7 +111,15 @@ class ScanPipeline:
                 logger.warning("Cannot read %s: %s", abs_path, e)
                 continue
             existing = known.get(rel_path)
-            if existing and existing["content_hash"] == hash_hex:
+            if (
+                existing
+                and existing["content_hash"] == hash_hex
+                # Byte-identical AND fully analyzed: refresh the stat mirror
+                # only. A 'hashed' row (a previous pass without face models)
+                # must fall through to processing or it would never receive
+                # faces.
+                and existing["analysis_state"] == "analyzed"
+            ):
                 # Touched but byte-identical: refresh stat mirror only.
                 self.store.upsert_file(
                     rel_path, hash_hex, stat.st_mtime, stat.st_size,
@@ -134,7 +142,8 @@ class ScanPipeline:
                 stats["dedup_hits"] += 1
                 self._progress(stats, rel_path)
                 continue
-            self._process(abs_path, rel_path, hash_hex, stat, media, stats)
+            self._process(abs_path, rel_path, hash_hex, stat, stats,
+                          added_at=existing["added_at"] if existing else None)
             self._progress(stats, rel_path)
 
         if self.abort_check():
@@ -182,7 +191,8 @@ class ScanPipeline:
         self._progress(stats, os.path.basename(abs_path), hashing=True)
         return content_hash(abs_path)
 
-    def _process(self, abs_path, rel_path, hash_hex, stat, media, stats):
+    def _process(self, abs_path, rel_path, hash_hex, stat, stats,
+                 added_at=None):
         suffix = Path(abs_path).suffix.lower()
         kind = "video" if suffix in VIDEO_EXTENSIONS else "photo"
         meta = {
@@ -243,7 +253,7 @@ class ScanPipeline:
         self.store.upsert_media(meta)
         self.store.upsert_file(
             rel_path, hash_hex, stat.st_mtime, stat.st_size, kind=kind,
-            added_at=None if media is None else _now(),
+            added_at=added_at,
         )
         stats["decoded"] += 1
 
@@ -337,7 +347,9 @@ class ScanPipeline:
         """Motion photos: a video sharing a photo's basename (IMG_0123.jpg +
         IMG_0123.mp4). The photo grows a ``motion`` flag pointing at the
         video; the video is marked ``motion_pair`` so the feed shows the pair
-        once, with a play affordance on the photo — never as two items."""
+        once, with a play affordance on the photo — never as two items.
+        Pairings are recomputed every pass, so a deleted sibling clears the
+        survivor's stale flag instead of pointing at a ghost file."""
         photo_stems: dict[str, str] = {}
         video_by_stem: dict[str, str] = {}
         for rel_path in seen_paths:
@@ -347,12 +359,10 @@ class ScanPipeline:
                 photo_stems.setdefault(stem, rel_path)
             elif suffix in VIDEO_EXTENSIONS:
                 video_by_stem.setdefault(stem, rel_path)
+        for stem, photo_rel in photo_stems.items():
+            self._merge_flag(photo_rel, {"motion": video_by_stem.get(stem)})
         for stem, video_rel in video_by_stem.items():
-            photo_rel = photo_stems.get(stem)
-            if not photo_rel:
-                continue
-            self._merge_flag(photo_rel, {"motion": video_rel})
-            self._merge_flag(video_rel, {"motion_pair": photo_rel})
+            self._merge_flag(video_rel, {"motion_pair": photo_stems.get(stem)})
 
     def _merge_flag(self, rel_path: str, extra: dict):
         state = self.store.get_file_state(rel_path)
@@ -367,7 +377,11 @@ class ScanPipeline:
             flags = {}
         if all(flags.get(k) == v for k, v in extra.items()):
             return
-        flags.update(extra)
+        for key, value in extra.items():
+            if value is None:
+                flags.pop(key, None)  # pairing ended: drop the stale flag
+            else:
+                flags[key] = value
         self.store.upsert_media(
             {"content_hash": media["content_hash"], "flags": _dumps(flags)}
         )
@@ -440,10 +454,6 @@ def _preview_kept(name: str, known: set) -> bool:
         digest = name.rsplit("_", 1)[0]
         return len(digest) == 64 and digest in known
     return False
-
-
-def _now() -> float:
-    return time.time()
 
 
 def _photo_flags(rel_path: str, width, height) -> dict:

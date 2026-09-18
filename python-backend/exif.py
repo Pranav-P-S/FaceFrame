@@ -8,6 +8,7 @@ what a photo manager owes its user. Without EXIF the file mtime stands in.
 """
 
 import calendar
+import math
 import time
 
 DATETIME_ORIGINAL = 0x9003
@@ -100,7 +101,9 @@ def _dms(value):
             else:
                 parts.append(float(component))
         degrees, minutes, seconds = parts
-        return degrees + minutes / 60.0 + seconds / 3600.0
+        result = degrees + minutes / 60.0 + seconds / 3600.0
+        # A zero denominator can surface as nan/inf; that is no coordinate.
+        return result if math.isfinite(result) else None
     except (TypeError, ValueError, ZeroDivisionError, IndexError):
         return None
 
@@ -114,16 +117,20 @@ def _clean_str(value):
 
 def _int_or_none(value):
     try:
-        return int(value)
+        result = int(value)
     except (TypeError, ValueError):
         return None
+    return result
 
 
 def _rational_or_none(value):
     try:
         if isinstance(value, tuple):
             num, den = value[0], value[1]
-            return float(num) / float(den) if den else None
-        return float(value)
+            result = float(num) / float(den) if den else None
+        else:
+            result = float(value)
     except (TypeError, ValueError, ZeroDivisionError, IndexError):
         return None
+    # Guard nan/inf so no non-finite value reaches the stored exif JSON.
+    return result if result is not None and math.isfinite(result) else None

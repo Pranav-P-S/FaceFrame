@@ -5,6 +5,7 @@ presentation (story player); the backend only decides what exists and what's
 in it.
 """
 
+import datetime
 import json
 import time
 
@@ -58,8 +59,11 @@ def _on_this_day(store, today_month_day, now_epoch) -> list:
         ).fetchall()
 
     by_year: dict[int, list] = {}
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
     for row in rows:
-        item_year = time.gmtime(row["ts"]).tm_year
+        # Pure arithmetic: 1900-era EXIF timestamps are negative epochs,
+        # which time.gmtime/datetime.fromtimestamp cannot convert on Windows.
+        item_year = (epoch + datetime.timedelta(seconds=row["ts"])).year
         if item_year < current_year:
             by_year.setdefault(item_year, []).append(row)
 

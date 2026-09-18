@@ -7,6 +7,7 @@ includable, motion-pair videos hidden behind their photo.
 """
 
 import calendar
+import datetime
 import json
 import time
 
@@ -100,15 +101,25 @@ def _flags(raw):
 
 
 def _day_key(ts: float) -> str:
-    return time.strftime("%Y-%m-%d", time.gmtime(ts))
+    return _utc(ts).strftime("%Y-%m-%d")
 
 
 def _month_key(ts: float) -> str:
-    return time.strftime("%Y-%m", time.gmtime(ts))
+    return _utc(ts).strftime("%Y-%m")
 
 
 def _year_key(ts: float) -> str:
-    return time.strftime("%Y", time.gmtime(ts))
+    return _utc(ts).strftime("%Y")
+
+
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _utc(ts: float):
+    """Epoch -> aware UTC datetime via pure arithmetic: both time.gmtime and
+    datetime.fromtimestamp refuse pre-1970 EXIF years (e.g. 1900) on
+    Windows, and a 1900 photo must still land in a day group."""
+    return _EPOCH + datetime.timedelta(seconds=ts)
 
 
 # ------------------------------------------------------------------- search
@@ -171,6 +182,11 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
                        WHERE fa.content_hash=f.content_hash AND p.name=?)"""
         )
         params.append(value)
+
+    for value in parsed.get("label"):
+        # Substring match: label:retriever hits "golden retriever".
+        where.append("m.labels LIKE ?")
+        params.append(f"%{value}%")
 
     place_values = parsed.get("place")
     if place_values:

@@ -1,8 +1,14 @@
 import { api } from '../types';
+import { useStore } from './store';
 
 /** Typed convenience wrappers over the generic request channel. */
 export const backend = {
-  openLibrary: (path: string) => call('open_library', { path }),
+  // The backend returns the LibraryInfo fields flat (path, items, …); the
+  // UI contract is { library } — normalize here so call sites agree.
+  openLibrary: async (path: string) => {
+    const res = await call('open_library', { path });
+    return ('library' in res ? res : { library: res }) as { library: import('../types').LibraryInfo };
+  },
   getFeed: (opts: { view?: string; include_archived?: boolean; include_locked?: boolean; favorite?: boolean; archived_only?: boolean; limit?: number } = {}) =>
     call('get_feed', opts),
   search: (query: string, include_locked = false) => call('search', { query, include_locked }),
@@ -70,6 +76,43 @@ export const backend = {
   setWatch: (enabled: boolean, interval?: number) => call('set_watch', { enabled, interval }),
 };
 
+// Actions whose context comes from a file path instead of the library root
+// (or that carry their own path). Everything else the backend resolves via
+// req["path"] — the library root — which we attach automatically so call
+// sites don't have to thread it through every wrapper.
+const FILE_SCOPED_ACTIONS = new Set(['get_item', 'get_image_preview', 'magic_eraser']);
+
+// get_feed/search are the two views whose SQL returns library-RELATIVE file
+// paths (every other handler absolutizes via _as_item). The UI contract is
+// absolute paths (see types.ts), so re-anchor them to the library root here.
+function isAbsolutePath(p: string): boolean {
+  return /^([a-zA-Z]:[\\/]|\/|\\\\)/.test(p);
+}
+
+function absolutizeItems(root: string, res: Record<string, unknown>): Record<string, unknown> {
+  const base = root.replace(/[\\/]+$/, '');
+  const fix = (item: unknown) => {
+    const it = item as { path?: string } | undefined;
+    if (it && typeof it.path === 'string' && it.path && !isAbsolutePath(it.path)) {
+      it.path = `${base}/${it.path}`;
+    }
+  };
+  const groups = res.groups as { items?: unknown[] }[] | undefined;
+  if (Array.isArray(groups)) for (const g of groups) (g.items ?? []).forEach(fix);
+  const items = res.items as unknown[] | undefined;
+  if (Array.isArray(items)) items.forEach(fix);
+  return res;
+}
+
 async function call(action: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return api().request(action, params);
+  const merged = { ...params };
+  const libraryPath = useStore.getState().libraryPath;
+  if (!FILE_SCOPED_ACTIONS.has(action) && merged.path === undefined) {
+    if (libraryPath) merged.path = libraryPath;
+  }
+  const res = await api().request(action, merged);
+  if ((action === 'get_feed' || action === 'search') && libraryPath) {
+    return absolutizeItems(libraryPath, res);
+  }
+  return res;
 }

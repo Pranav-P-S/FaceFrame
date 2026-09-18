@@ -251,7 +251,9 @@ class LibraryService:
     def archived_items(self):
         with self.store.connect() as conn:
             return conn.execute(
-                """SELECT f.path, f.content_hash FROM files f
+                """SELECT f.path, f.content_hash, m.kind AS media_kind,
+                          COALESCE(m.date_override, m.capture_time, f.mtime) AS ts
+                   FROM files f
                    JOIN media m ON m.content_hash=f.content_hash
                    WHERE f.trashed_at IS NULL AND f.missing=0
                      AND COALESCE(m.archived,0)=1"""
@@ -260,7 +262,9 @@ class LibraryService:
     def locked_items(self):
         with self.store.connect() as conn:
             return conn.execute(
-                """SELECT f.path, f.content_hash FROM files f
+                """SELECT f.path, f.content_hash, m.kind AS media_kind,
+                          COALESCE(m.date_override, m.capture_time, f.mtime) AS ts
+                   FROM files f
                    JOIN media m ON m.content_hash=f.content_hash
                    WHERE f.trashed_at IS NULL AND COALESCE(m.locked,0)=1"""
             ).fetchall()

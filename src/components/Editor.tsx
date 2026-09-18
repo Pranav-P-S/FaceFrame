@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../types';
 import { backend } from '../lib/api';
+import { bumpImageCache } from '../images';
 import { useStore } from '../lib/store';
 
 export interface EditState {
@@ -86,8 +87,12 @@ export default function Editor({
   }, [edit, filePath]);
 
   const save = async () => {
-    const hasEdit = Object.keys(edit).length > 0;
-    await backend.setEdit(hash, hasEdit ? { ...edit, eraser: rects.length ? rects : undefined } : null);
+    const hasEdit = Object.keys(edit).length > 0 || rects.length > 0;
+    await backend.setEdit(
+      hash,
+      hasEdit ? { ...edit, eraser: rects.length ? rects : undefined } : null,
+    );
+    bumpImageCache();
     showToast({ text: hasEdit ? 'Edits saved — original kept' : 'Edits reverted', kind: 'info' });
     onClose();
   };

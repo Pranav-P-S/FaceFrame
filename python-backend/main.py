@@ -392,6 +392,10 @@ def _get_feed(req):
         favorite=req.get("favorite"),
         limit=int(req.get("limit", 4000)),
     )
+    root = ctx["root"]
+    for group in groups:
+        for item in group["items"]:
+            item["path"] = _abs(ctx, item["path"])
     return {"groups": groups}
 
 
@@ -400,10 +404,13 @@ def _search(req):
     import views
 
     ctx = locate_library(req["path"])
-    return views.search_items(
+    result = views.search_items(
         ctx["store"], req.get("query", ""),
         include_locked=bool(req.get("include_locked")),
     )
+    for item in result["items"]:
+        item["path"] = _abs(ctx, item["path"])
+    return result
 
 
 @action("get_item")
@@ -417,11 +424,12 @@ def _get_item(req):
     ctx = _context_for_file(file_path)
     if ctx is None:
         raise ValueError("File is not part of an indexed library")
-    detail = views.item_detail(
-        ctx["store"], pathio.to_relative(file_path, ctx["root"])
-    )
+    rel = pathio.to_relative(file_path, ctx["root"])
+    detail = views.item_detail(ctx["store"], rel)
     if detail is None:
         raise ValueError("Item not found")
+    detail["path"] = file_path
+    detail["duplicate_paths"] = [_abs(ctx, p) for p in detail["duplicate_paths"]]
     return {"item": detail}
 
 
@@ -479,17 +487,27 @@ def _empty_trash(req):
     """Purge everything in trash (the 60-day policy does it gradually)."""
     ctx = locate_library(req["path"])
     removed = 0
+    failed = 0
     for row in ctx["library"].trashed_items():
         if ctx["library"]._send_path_to_os_trash(row["path"]):
             ctx["store"].remove_file(row["path"])
             removed += 1
-    return {"removed": removed}
+        else:
+            failed += 1
+    if failed:
+        logger.error("empty_trash: %d item(s) could not be sent to the OS trash", failed)
+    return {"removed": removed, "failed": failed}
 
 
 @action("delete_from_disk")
 def _delete_from_disk(req):
     ctx = locate_library(req["path"])
-    return {"removed": ctx["library"].delete_from_disk(req.get("paths") or [])}
+    paths = req.get("paths") or []
+    removed = ctx["library"].delete_from_disk(paths)
+    failed = len(paths) - removed
+    if failed:
+        logger.error("delete_from_disk: %d path(s) refused or failed", failed)
+    return {"removed": removed, "failed": failed}
 
 
 @action("set_caption")
@@ -629,8 +647,6 @@ def _album_reorder(req):
 
 @action("get_album")
 def _get_album(req):
-    import views
-
     ctx = locate_library(req["path"])
     meta = next(
         (a for a in ctx["library"].list_albums() if a["id"] == req["album_id"]),
@@ -638,14 +654,36 @@ def _get_album(req):
     )
     if not meta:
         raise ValueError("Album not found")
-    rows = ctx["library"].album_items(req["album_id"], include_trashed=False)
+    # One joined query — an album of 500 items must not cost 1000 round trips.
+    with ctx["store"].connect() as conn:
+        rows = conn.execute(
+            """SELECT ai.content_hash, ai.position, ai.added_at,
+                      MIN(f.path) AS rel_path,
+                      COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
+                      m.kind AS media_kind, m.width, m.height, m.duration,
+                      m.favorite, m.archived, m.locked, m.caption,
+                      m.poster_path, m.flags
+               FROM album_items ai
+               JOIN files f ON f.content_hash = ai.content_hash
+                    AND f.missing=0 AND f.trashed_at IS NULL
+               JOIN media m ON m.content_hash = ai.content_hash
+               WHERE ai.album_id=?
+               GROUP BY ai.position, ai.content_hash
+               ORDER BY ai.position, ai.added_at""",
+            (req["album_id"],),
+        ).fetchall()
     items = []
     for row in rows:
-        state = ctx["store"].get_file_state(
-            _any_path(ctx, row["content_hash"]) or ""
-        )
-        if state:
-            items.append(_as_item(ctx, {"path": state["path"], "content_hash": row["content_hash"]}))
+        item = dict(row)
+        item["path"] = _abs(ctx, item.pop("rel_path"))
+        item["kind"] = item.get("kind") or item.get("media_kind") or "photo"
+        try:
+            import json as _json
+
+            item["flags"] = _json.loads(item["flags"]) if item.get("flags") else {}
+        except ValueError:
+            item["flags"] = {}
+        items.append(item)
     meta["cover"] = _abs(ctx, _cover_rel(ctx, meta.get("cover_hash")))
     meta["items"] = items
     return {"album": meta}
@@ -919,6 +957,9 @@ def _resolve_missing(req):
     ctx = locate_library(req["path"])
     removed = 0
     for path in req.get("paths") or []:
+        # Renderer-supplied: refuse anything outside the library, the same
+        # contract every other path-taking action enforces.
+        ctx["library"]._contained(path)
         rel = pathio.to_relative(path, ctx["root"])
         ctx["store"].remove_file(rel)
         removed += 1

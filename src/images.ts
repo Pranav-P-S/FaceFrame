@@ -7,6 +7,15 @@ import { api } from './types';
 const GRID = 384;
 const VIEWER = 2200;
 
+let cacheVersion = 0;
+
+/** Editors call this after saving/reverting so cached previews of the edited
+ * item are refetched instead of showing stale pixels. */
+export function bumpImageCache(): void {
+  cacheVersion += 1;
+  caches.clear();
+}
+
 const caches = new Map<number, Map<string, string>>();
 const limits = new Map<number, number>([
   [GRID, 600],
@@ -25,7 +34,7 @@ function cacheFor(size: number): Map<string, string> {
 
 export function imageDataUrl(path: string, size: number = GRID, square = false): Promise<string | null> {
   const cache = cacheFor(size);
-  const key = `${size}:${square ? 'sq' : 'fit'}:${path}`;
+  const key = `${cacheVersion}:${size}:${square ? 'sq' : 'fit'}:${path}`;
   const hit = cache.get(key);
   if (hit) {
     cache.delete(key);

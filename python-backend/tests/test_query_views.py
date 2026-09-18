@@ -185,3 +185,22 @@ def test_item_detail_shape(dated_lib):
     assert detail["media"]["favorite"] == 1
     assert detail["media"]["content_hash"] == hashes["p0.jpg"]
     assert "exif" in detail["media"]
+
+
+def test_search_by_label_filter(dated_lib):
+    root, store, lib, hashes = dated_lib
+    # Give two items labels via the store (as the labeler would).
+    for path in ("p0.jpg", "p2.jpg"):
+        with store.connect() as conn:
+            h = conn.execute(
+                "SELECT content_hash FROM files WHERE path=?", (path,)
+            ).fetchone()[0]
+        store.upsert_media({"content_hash": h, "labels": '["golden retriever"]'})
+    store.sync_fts()  # production syncs FTS at scan end
+    from views import search_items
+
+    result = search_items(store, "label:retriever")
+    assert {i["path"] for i in result["items"]} == {"p0.jpg", "p2.jpg"}
+    # Free text still finds labels too.
+    result = search_items(store, "retriever")
+    assert len(result["items"]) == 2
