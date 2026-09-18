@@ -356,8 +356,14 @@ function startPythonBackend() {
     });
 }
 
+let modelLoadingSeen = false;
+
 function waitForBackend(attempt = 0) {
-  if (attempt > 30) {
+  // The backend announces model_status:loading before its first-run model
+  // download (hundreds of MB): give that generous room instead of killing
+  // it at the 30s generic watchdog.
+  const maxAttempts = modelLoadingSeen ? 20 * 120 : 30;
+  if (attempt > maxAttempts) {
     killPython();
     backendError = 'backend-timeout';
     lastBackendStatus = { state: 'unavailable', reason: backendError };
@@ -395,6 +401,9 @@ function handleBackendLine(line) {
 
   if (message.event) {
     const { event, ...payload } = message;
+    if (event === 'model_status') {
+      modelLoadingSeen = event.state === 'loading' ? true : modelLoadingSeen;
+    }
     broadcast('backend-event', { event, ...payload });
   }
 }

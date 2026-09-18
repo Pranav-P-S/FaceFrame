@@ -46,6 +46,7 @@ export interface Item {
   caption?: string | null;
   poster_path?: string | null;
   flags?: Record<string, unknown>;
+  labels?: string[];
 }
 
 export interface FeedGroup {

@@ -941,6 +941,12 @@ def test_purge_with_zero_age_sends_everything_to_os_trash(factory, monkeypatch):
     sent = []
     monkeypatch.setattr("library.send2trash", lambda p: sent.append(p))
     svc.set_trashed(paths=["doomed.jpg"], trashed=True)
+    # Backdate explicitly: time.time() can return the same value for the
+    # trash stamp and the purge cutoff on coarse Windows timers.
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE files SET trashed_at = trashed_at - 10 WHERE path='doomed.jpg'"
+        )
     removed = svc.purge_expired_trash(max_age_days=0)
     assert removed == 1
     assert len(sent) == 1 and sent[0].endswith("doomed.jpg")

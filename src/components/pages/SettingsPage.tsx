@@ -14,6 +14,7 @@ export default function SettingsPage() {
   const [scanning, setScanning] = useState(false);
   const [lockCode, setLockCode] = useState('');
   const [lockSet, setLockSet] = useState<boolean | null>(null);
+  const [provider, setProvider] = useState(() => localStorage.getItem('faceframe.provider') || 'auto');
 
   useEffect(() => {
     void api().getProviders().then((res) => setCompute(res.compute)).catch(() => setCompute(null));
@@ -39,7 +40,7 @@ export default function SettingsPage() {
     setLibraryPath(folder);
     setScanning(true);
     try {
-      await api().scanDirectory(folder, 'auto');
+      await api().scanDirectory(folder, localStorage.getItem('faceframe.provider') || 'auto');
       showToast({ text: 'Scan started', kind: 'info' });
     } catch (e) {
       showToast({ text: e instanceof Error ? e.message : 'Scan failed to start', kind: 'error' });
@@ -81,8 +82,18 @@ export default function SettingsPage() {
       <section className="utility-card">
         <h2>Processing</h2>
         <div className="setting-row">
-          <span>Engine</span>
-          <span className="info-muted">{compute?.device_label ?? '…'}{compute?.cuda_listed ? ' · CUDA available' : ''}</span>
+          <span>Detection engine</span>
+          <select
+            value={provider}
+            onChange={(e) => {
+              setProvider(e.target.value);
+              localStorage.setItem('faceframe.provider', e.target.value);
+            }}
+          >
+            <option value="auto">Auto{compute ? ` (${compute.device_label})` : ''}</option>
+            <option value="cpu">CPU</option>
+            {compute?.cuda_listed && <option value="cuda">GPU (CUDA)</option>}
+          </select>
         </div>
         {(
           [

@@ -19,6 +19,7 @@ interface AppState {
   density: number; // grid zoom level 0..3
   selection: Set<string>; // absolute item paths
   selectionOrder: string[];
+  selectionHashes: Record<string, string>; // path -> content_hash
   anchor: string | null;
   viewer: { items: Item[]; index: number } | null;
   infoOpen: boolean;
@@ -33,7 +34,7 @@ interface AppState {
   setDensity: (level: number) => void;
   setScan: (scan: ScanState | null | ((s: ScanState | null) => ScanState | null)) => void;
   refresh: () => void;
-  toggleSelect: (path: string) => void;
+  toggleSelect: (path: string, hash?: string) => void;
   selectRange: (paths: string[], anchor: string) => void;
   selectAll: (paths: string[]) => void;
   clearSelection: () => void;
@@ -54,6 +55,7 @@ export const useStore = create<AppState>((set, get) => ({
   selection: new Set(),
   selectionOrder: [],
   anchor: null,
+  selectionHashes: {},
   viewer: null,
   infoOpen: false,
   toast: null,
@@ -80,15 +82,18 @@ export const useStore = create<AppState>((set, get) => ({
   },
   setScan: (scan) => set((s) => ({ scan: typeof scan === 'function' ? scan(s.scan) : scan })),
   refresh: () => set((s) => ({ refreshToken: s.refreshToken + 1 })),
-  toggleSelect: (path) => {
-    const { selection, selectionOrder } = get();
+  toggleSelect: (path, hash) => {
+    const { selection, selectionOrder, selectionHashes } = get();
     const next = new Set(selection);
     if (next.has(path)) {
       next.delete(path);
-      set({ selection: next, selectionOrder: selectionOrder.filter((p) => p !== path) });
+      const hashes = { ...selectionHashes };
+      delete hashes[path];
+      set({ selection: next, selectionOrder: selectionOrder.filter((p) => p !== path), selectionHashes: hashes });
     } else {
       next.add(path);
-      set({ selection: next, selectionOrder: [...selectionOrder, path], anchor: path });
+      const hashes = hash ? { ...selectionHashes, [path]: hash } : selectionHashes;
+      set({ selection: next, selectionOrder: [...selectionOrder, path], anchor: path, selectionHashes: hashes });
     }
   },
   selectRange: (paths, anchor) => {
@@ -98,14 +103,16 @@ export const useStore = create<AppState>((set, get) => ({
     if (from < 0 || to < 0) return;
     const start = Math.min(from, to);
     const end = Math.max(from, to);
-    set({
-      selection: new Set(paths.slice(start, end + 1)),
-      selectionOrder: paths.slice(start, end + 1),
-      anchor,
-    });
+    const slice = paths.slice(start, end + 1);
+    const hashes = { ...state.selectionHashes };
+    for (const p of slice) {
+      const h = state.selectionHashes[p] ?? flatHashLookup(state, p);
+      if (h) hashes[p] = h;
+    }
+    set({ selection: new Set(slice), selectionOrder: slice, anchor, selectionHashes: hashes });
   },
   selectAll: (paths) => set({ selection: new Set(paths), selectionOrder: [...paths] }),
-  clearSelection: () => set({ selection: new Set(), selectionOrder: [], anchor: null }),
+  clearSelection: () => set({ selection: new Set(), selectionOrder: [], anchor: null, selectionHashes: {} }),
 
   openViewer: (items, index) => set({ viewer: { items, index } }),
   closeViewer: () => set({ viewer: null, infoOpen: false }),
@@ -119,6 +126,17 @@ export const useStore = create<AppState>((set, get) => ({
 
 if (typeof window !== 'undefined') {
   (window as unknown as { __ffstore: unknown }).__ffstore = useStore;
+}
+
+// Filled by PhotoGrid so range selections can resolve hashes without
+// per-item backend round trips.
+let knownHashes = new Map<string, string>();
+export function rememberHashes(pairs: [string, string][]): void {
+  knownHashes = new Map(pairs);
+}
+function flatHashLookup(state: unknown, path: string): string | undefined {
+  void state;
+  return knownHashes.get(path);
 }
 
 window.addEventListener('hashchange', () => {

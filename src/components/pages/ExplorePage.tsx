@@ -1,24 +1,25 @@
 import { useEffect, useState } from 'react';
 import { backend } from '../../lib/api';
+import { useStore } from '../../lib/store';
 import type { Item, Person, PlaceGroup } from '../../types';
 import { useImage } from '../../images';
 
 /** Explore: people, places and things — the auto-organized projections. */
 export default function ExplorePage() {
+  const libraryPath = useStore((s) => s.libraryPath);
   const [persons, setPersons] = useState<Person[]>([]);
   const [places, setPlaces] = useState<PlaceGroup[]>([]);
   const [things, setThings] = useState<{ label: string; count: number; cover: Item | null }[]>([]);
 
   useEffect(() => {
-    void backend.getPersons('current').then((res) => setPersons((res.persons as Person[]) ?? []));
+    if (!libraryPath) return;
+    void backend.getPersons(libraryPath).then((res) => setPersons((res.persons as Person[]) ?? []));
     void backend.getPlaces(false).then((res) => setPlaces((res.places as PlaceGroup[]) ?? []));
     void backend.search('').then((res) => {
       const items = (res.items as Item[]) ?? [];
       const byLabel = new Map<string, { count: number; cover: Item | null }>();
       for (const item of items) {
-        const labels = (item.flags as Record<string, unknown>) ?? {};
-        void labels;
-        const itemLabels = ((item as unknown as { labels?: string[] }).labels ?? []) as string[];
+        const itemLabels = (item.labels ?? []) as string[];
         for (const label of itemLabels) {
           const entry = byLabel.get(label) ?? { count: 0, cover: null };
           if (!entry.cover) entry.cover = item;
@@ -28,7 +29,7 @@ export default function ExplorePage() {
       }
       setThings([...byLabel.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 12).map(([label, v]) => ({ label, ...v })));
     });
-  }, []);
+  }, [libraryPath]);
 
   return (
     <div className="page">

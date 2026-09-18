@@ -355,7 +355,7 @@ class ScanPipeline:
         for rel_path in seen_paths:
             suffix = Path(rel_path).suffix.lower()
             stem = Path(rel_path).stem.lower()
-            if suffix in IMAGE_EXTENSIONS and suffix not in (".gif",):
+            if suffix in IMAGE_EXTENSIONS:
                 photo_stems.setdefault(stem, rel_path)
             elif suffix in VIDEO_EXTENSIONS:
                 video_by_stem.setdefault(stem, rel_path)

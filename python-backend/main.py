@@ -218,8 +218,13 @@ def run_scan(path, provider):
         )
         pipeline.abort_check = _abort_scan.is_set
 
+        # Purge before the completion event: once scan_complete is out, the
+        # busy-guard must genuinely be free, or an immediate follow-up scan
+        # races with the cleanup tail.
+        if not _abort_scan.is_set():
+            ctx["library"].purge_expired_trash()
+
         stats = pipeline.run()
-        ctx["library"].purge_expired_trash()
 
         if stats.get("cancelled"):
             emit({"event": "scan_cancelled", "path": root})
@@ -740,7 +745,11 @@ def _get_unclustered(req):
 def _get_photos_by_person(req):
     ctx = locate_library(req["path"])
     photos = [
-        {"path": _abs(ctx, row["path"]), "face_count": row["face_count"]}
+        {
+            "path": _abs(ctx, row["path"]),
+            "content_hash": row["content_hash"],
+            "face_count": row["face_count"],
+        }
         for row in ctx["people"].person_photos(req["person_id"])
     ]
     return {"photos": photos}
@@ -1205,6 +1214,10 @@ def _warm_heavy_imports():
 
 def main():
     logger.info("Backend started (v3)")
+    # Announce BEFORE the heavy chain: on first run this imports the models
+    # and can download hundreds of MB, so the host must know we are alive
+    # (its ping watchdog only sees answers once the loop below starts).
+    emit({"event": "model_status", "state": "loading"})
     _warm_heavy_imports()
     try:
         # Construct the default model pipeline here, on the main thread:
@@ -1214,6 +1227,7 @@ def main():
         get_shared_labeler()
     except Exception as e:
         logger.warning("Models not ready at startup: %s", e)
+    emit({"event": "model_status", "state": "ready"})
     while True:
         try:
             line = sys.stdin.readline()

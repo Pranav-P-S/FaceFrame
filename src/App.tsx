@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import './App.css';
 
 import { api, type BackendEvent } from './types';
@@ -21,6 +21,10 @@ import Viewer from './components/Viewer';
 
 export default function App() {
   const route = useStore((s) => s.route);
+  const [backendStatus, setBackendStatus] = useState<{
+    state: string;
+    reason?: string;
+  } | null>(null);
   const theme = useStore((s) => s.theme);
   const toast = useStore((s) => s.toast);
   const showToast = useStore((s) => s.showToast);
@@ -45,6 +49,7 @@ export default function App() {
   // One-time wiring: backend status + event stream.
   useEffect(() => {
     api().onBackendStatus((status) => {
+      setBackendStatus(status);
       if (status.state === 'ready' && libraryPath) refresh();
     });
 
@@ -133,9 +138,36 @@ export default function App() {
     }
   })();
 
+  const backendDown =
+    backendStatus && backendStatus.state !== 'ready';
+
   return (
     <div className="app">
       <TopBar />
+      {backendDown && (
+        <div className="notice notice-warning notice-banner" role="alert">
+          <span>
+            {backendStatus.state === 'unavailable'
+              ? backendStatus.reason === 'python-not-found'
+                ? 'The photo engine could not start: Python was not found. Install Python 3.10+ and create the venv (see README).'
+                : `The photo engine stopped (${backendStatus.reason || 'unknown reason'}).`
+              : 'The photo engine is starting…'}
+          </span>
+          {backendStatus.state === 'unavailable' && (
+            <button
+              className="btn btn-small"
+              onClick={() => {
+                setBackendStatus({ state: 'starting' });
+                void api()
+                  .retryBackend()
+                  .catch(() => setBackendStatus({ state: 'unavailable', reason: 'retry-failed' }));
+              }}
+            >
+              Try again
+            </button>
+          )}
+        </div>
+      )}
       <div className="app-body">
         <Rail />
         <main className={`content ${route.page === 'photos' ? 'content-grid' : ''}`}>{page}</main>

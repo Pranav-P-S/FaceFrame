@@ -64,13 +64,6 @@ class FaceProcessor:
                 face_analysis_cls, ["CPUExecutionProvider"]
             )
 
-    def process_image(self, image_path: str):
-        """Return a list of face dicts for one image (empty if no faces)."""
-        img = read_image_bgr(image_path)
-        if img is None:
-            return []
-        return self.process_decoded(image_path, img)
-
     def process_decoded(self, image_path: str, img: np.ndarray, face_key: str | None = None):
         """Same as process_image, for callers that already decoded the file.
 

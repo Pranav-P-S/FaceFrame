@@ -309,12 +309,11 @@ class Store:
                    WHERE missing=0 AND kind != 'creation'"""
             ).fetchall()
             gone = [r["path"] for r in rows if r["path"] not in seen_paths]
+            hash_by_path = {r["path"]: r["content_hash"] for r in rows}
             moved = []
             really_gone = []
             for path in gone:
-                content_hash = next(
-                    (r["content_hash"] for r in rows if r["path"] == path), None
-                )
+                content_hash = hash_by_path.get(path)
                 if content_hash:
                     live_elsewhere = conn.execute(
                         """SELECT COUNT(*) FROM files

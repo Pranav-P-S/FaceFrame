@@ -22,7 +22,8 @@ FaceFrame grows from a face browser into a complete local photo manager.
   (on this day, trips, highlights) with a story player.
 - Favorites, archive, trash with 60-day retention ending in the OS Recycle
   Bin, passcode-gated locked folder.
-- Duplicates review (exact via sha256; near/burst via dHash), missing-file
+- Duplicates review (exact matches via sha256; perceptual dHashes are stored
+  as the foundation for near-duplicate/burst grouping), missing-file
   tracking with automatic relink, storage stats, cache cleanup.
 - Watch mode for automatic re-scans; light/dark themes; keyboard shortcuts;
   deterministic mock backend for browser-only development (`?mock=1`).

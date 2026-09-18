@@ -15,7 +15,10 @@ def write_jpeg(path: Path, width=64, height=48, color=(200, 120, 40)) -> Path:
     import cv2
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(abs(hash(str(color))) % (2**32))
+    # Stable per color: hash() is randomized per process and would make
+    # fixtures (and hash-based assertions) nondeterministic across runs.
+    seed = (int(color[0]) * 65536 + int(color[1]) * 256 + int(color[2])) % (2**32)
+    rng = np.random.default_rng(seed)
     img = np.zeros((height, width, 3), dtype=np.uint8)
     img[:, :] = color
     # Texture (noise + gradient) so perceptual hashes have bits to work with,

@@ -58,7 +58,7 @@ def _base_items(
                COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
                m.favorite, m.archived, m.locked, m.caption, m.poster_path,
-               m.flags
+               m.flags, m.labels
         FROM files f JOIN media m ON m.content_hash = f.content_hash
         WHERE f.missing=0 AND f.trashed_at IS NULL
     """
@@ -81,7 +81,17 @@ def _base_items(
     items = [dict(r) for r in rows]
     for item in items:
         item["flags"] = _flags(item.get("flags"))
+        item["labels"] = _labels(item.get("labels"))
     return items
+
+
+def _labels(raw):
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return []
 
 
 def _motion_pair_filter() -> str:
@@ -230,6 +240,7 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
     items = [dict(r) for r in rows]
     for item in items:
         item["flags"] = _flags(item.get("flags"))
+        item["labels"] = _labels(item.get("labels"))
     return {"items": items, "total": len(items), "filters": parsed.filters}
 
 

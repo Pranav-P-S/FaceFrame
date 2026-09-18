@@ -24,7 +24,9 @@ if (!python) {
   process.exit(1);
 }
 
-const child = spawn(python, [path.join(root, 'scripts', 'e2e_backend_test.py')], {
+const suite = process.argv[2] === 'v3' ? 'e2e_v3_test.py' : 'e2e_backend_test.py';
+
+const child = spawn(python, [path.join(root, 'scripts', suite)], {
   stdio: 'inherit',
   cwd: root,
 });

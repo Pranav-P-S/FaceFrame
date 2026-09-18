@@ -335,13 +335,22 @@ def _cover_square(img, size: int):
 
 
 def _load_image(store, library_root: str, rel_path: str, content_hash: str):
-    """Photos decode directly; videos render their poster frame."""
+    """Photos decode directly; videos prefer their scan-time poster frame
+    (decoding the video per preview was the worst first-scroll jank)."""
+    import cv2
+
     from scan import read_image_bgr
 
-    absolute = str(Path(library_root) / rel_path)
     state = store.get_file_state(rel_path)
     if state and state["kind"] == "video":
-        return _video_poster(absolute, content_hash)
+        media = store.get_media(content_hash)
+        poster = media["poster_path"] if media else None
+        if poster:
+            poster_abs = Path(library_root) / poster
+            if poster_abs.is_file():
+                return cv2.imread(str(poster_abs))
+        return _video_poster(str(Path(library_root) / rel_path), content_hash)
+    absolute = str(Path(library_root) / rel_path)
     return read_image_bgr(absolute)
 
 

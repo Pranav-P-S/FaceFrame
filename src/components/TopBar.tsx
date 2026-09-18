@@ -136,7 +136,7 @@ export default function TopBar() {
             <button
               onClick={() => {
                 setMenuOpen(false);
-                void backend.getStorageStats();
+                window.location.hash = '#/utilities';
               }}
             >
               Storage
@@ -153,14 +153,23 @@ export default function TopBar() {
 function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) {
   const selection = useStore((s) => s.selection);
   const showToast = useStore((s) => s.showToast);
-  const libraryPath = useStore((s) => s.libraryPath);
-
   const hashes = async (): Promise<string[]> => {
-    const details = await Promise.all(
-      [...selection].map((path) => backend.getItem(path))
-    );
-    return details
-      .map((d) => (d.item as { media?: { content_hash?: string } } | undefined)?.media?.content_hash)
+    // Preferred: hashes remembered at selection time (no round trips).
+    const remembered = useStore.getState().selectionHashes;
+    const missing = [...selection].filter((p) => !remembered[p]);
+    const extra: Record<string, string> = {};
+    for (const path of missing) {
+      try {
+        const d = await backend.getItem(path);
+        const h = (d.item as { media?: { content_hash?: string } } | undefined)?.media
+          ?.content_hash;
+        if (h) extra[path] = h;
+      } catch {
+        // unresolvable path (e.g. trashed) — skip
+      }
+    }
+    return [...selection]
+      .map((p) => remembered[p] ?? extra[p])
       .filter((h): h is string => Boolean(h));
   };
 
@@ -217,7 +226,6 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
           await backend.setTrashed(hs, true);
           withUndo('Moved to trash', () => backend.setTrashed(hs, false));
           onDone();
-          void libraryPath;
         }}
       >
         Trash

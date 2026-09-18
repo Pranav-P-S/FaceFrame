@@ -66,6 +66,8 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (editing) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
       if (e.key === 'ArrowRight') move(1);
       else if (e.key === 'ArrowLeft') move(-1);
       else if (e.key === 'Escape') closeViewer();

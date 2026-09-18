@@ -99,11 +99,11 @@ function PersonDetail({ personId }: { personId: number }) {
       .getPersons(libraryPath)
       .then((res) => setPerson((res.persons as Person[]).find((p) => p.id === personId) ?? null));
     void backend.getPhotosByPerson(libraryPath, personId).then((res) => {
-      const paths = (res.photos as { path: string; face_count: number }[]) ?? [];
+      const photos = (res.photos as { path: string; content_hash: string }[]) ?? [];
       setPhotos(
-        paths.map((p) => ({
+        photos.map((p) => ({
           path: p.path,
-          content_hash: p.path,
+          content_hash: p.content_hash,
           kind: 'photo',
           ts: 0,
         })) as Item[]

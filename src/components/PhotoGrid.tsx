@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { rememberHashes } from '../lib/store';
 import type { Item } from '../types';
 import { justifyRows, visibleRows } from '../lib/layout';
 import { groupLabel, monthKey, yearKey } from '../lib/format';
@@ -125,6 +126,9 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
     flatItems.forEach((item, i) => m.set(item.path, i));
     return m;
   }, [flatItems]);
+  useEffect(() => {
+    rememberHashes(flatItems.map((i) => [i.path, i.content_hash] as [string, string]));
+  }, [flatItems]);
 
   return (
     <div className="grid-scroll" ref={containerRef} onScroll={onScroll}>
@@ -154,7 +158,7 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
                       onSelect={(shift) =>
                         shift && flatIndex >= 0
                           ? selectRange(flatPaths, item.path)
-                          : toggleSelect(item.path)
+                          : toggleSelect(item.path, item.content_hash)
                       }
                     />
                   </div>

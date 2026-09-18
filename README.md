@@ -46,9 +46,11 @@ gone.
   insightface wheels yet)
 - Windows, Linux, or macOS
 
-The face models (~350 MB) download once, on first scan, into `~/.insightface`;
-the optional "things" labeler adds a one-time ~14 MB model. Everything after
-that is fully offline.
+The face models (~350 MB) download once — at first launch of the photo
+engine — into `~/.insightface`; the optional "things" labeler adds a one-time
+~14 MB model. On slow connections the first launch waits for the download
+(the app tells you it is preparing the models). Everything after that is
+fully offline.
 
 ## Setup
 
@@ -74,7 +76,8 @@ Inference runs on CPU through ONNX Runtime by default. With NVIDIA CUDA 12.x
 venv\Scripts\pip install onnxruntime-gpu
 ```
 
-If the CUDA libraries are missing at runtime, the app quietly falls back to
+Then pick **GPU (CUDA)** under Settings → Processing → Detection engine. If
+the CUDA libraries are missing at runtime, the app quietly falls back to
 CPU.
 
 ## Running

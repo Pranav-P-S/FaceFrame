@@ -23,7 +23,6 @@ export default function Rail() {
       <div className="rail-section">
         <NavItem icon="▦" label="Photos" href="#/photos" active={route.page === 'photos'} />
         <NavItem icon="✦" label="Explore" href="#/explore" active={route.page === 'explore'} />
-        <NavItem icon="⤴" label="Sharing" href="#/sharing" active={false} />
       </div>
       <div className="rail-section-label">Library</div>
       <div className="rail-section">
