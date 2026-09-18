@@ -1,6 +1,6 @@
 {
   "name": "faceframe",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Local face detection and photo organization app",
   "private": true,
   "type": "module",
@@ -13,7 +13,8 @@
     "electron:build": "npm run build && electron-builder",
     "test": "node scripts/run-backend-e2e.mjs",
     "test:e2e": "node scripts/run-backend-e2e.mjs",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "test:e2e:v3": "python scripts/e2e_v3_test.py"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

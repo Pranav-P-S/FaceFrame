@@ -387,14 +387,17 @@ function installMock(): void {
           if (p) p.hidden = Boolean(params.hidden);
           return ok();
         }
-        case 'get_places':
+        case 'get_places': {
+          const all = visible();
+          const coverAt = (n: number) => all[n % all.length]?.path ?? null;
           return ok({
             places: [
-              { geohash: 'u33d', count: 9, items: [], cover: null, lat: 52.52, lon: 13.40, name: 'Berlin, Germany' },
-              { geohash: 'u09t', count: 6, items: [], cover: null, lat: 48.85, lon: 2.35, name: 'Paris, France' },
-              { geohash: 'dr5r', count: 4, items: [], cover: null, lat: 40.71, lon: -74.0, name: 'New York, USA' },
+              { geohash: 'u33d', count: 9, items: [], cover: coverAt(2), lat: 52.52, lon: 13.40, name: 'Berlin, Germany' },
+              { geohash: 'u09t', count: 6, items: [], cover: coverAt(5), lat: 48.85, lon: 2.35, name: 'Paris, France' },
+              { geohash: 'dr5r', count: 4, items: [], cover: coverAt(9), lat: 40.71, lon: -74.0, name: 'New York, USA' },
             ],
           });
+        }
         case 'get_memories': {
           const memoryItems = visible().filter((i) => i.path.includes('memory'));
           const favItems = visible().filter((i) => i.favorite).slice(0, 8);
@@ -419,14 +422,21 @@ function installMock(): void {
           return ok({ groups: [] });
         case 'get_missing':
           return ok({ items: [] });
-        case 'get_storage_stats':
+        case 'get_storage_stats': {
+          const bytes = visible().length * 3_200_000;
           return ok({
             stats: {
-              items: { count: visible().length, bytes: visible().length * 3_200_000 },
-              index_bytes: 48_000_000,
-              caches: { thumbnails: 120_000_000, previews: 340_000_000, posters: 8_000_000, creations: 0 },
+              items: { count: visible().length, bytes },
+              index_bytes: Math.round(bytes * 0.015),
+              caches: {
+                thumbnails: Math.round(bytes * 0.04),
+                previews: Math.round(bytes * 0.09),
+                posters: Math.round(bytes * 0.01),
+                creations: 0,
+              },
             },
           });
+        }
         case 'get_settings':
           return ok({ settings: { setting_labels: '1', setting_geocode: '1', setting_watch: '0' } });
         case 'set_settings':

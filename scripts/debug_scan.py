@@ -16,6 +16,7 @@ from conftest import write_jpeg  # noqa: E402
 
 def main():
     root = Path("test-data/library").resolve()
+    import shutil as _sh; _sh.rmtree(root / ".faceframe", ignore_errors=True)
     import shutil
     shutil.rmtree(root / ".faceframe", ignore_errors=True)
 

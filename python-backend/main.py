@@ -152,6 +152,44 @@ def get_processor(provider):
     return FaceProcessor(use_gpu=use_gpu, thumbnail_dir=None)
 
 
+_shared_processors: dict = {}
+_shared_labeler = None
+_labeler_tried = False
+
+
+def get_shared_processor(provider):
+    """One FaceProcessor, built at startup on the main thread and reused by
+    every scan regardless of the requested provider. Model construction in a
+    secondary thread deadlocks nondeterministically on Windows (the import
+    chain warms in the main thread, but ONNX session creation can still hang
+    there). A request for CUDA on a CPU-built instance falls back to the
+    shared CPU engine - the same quiet fallback the app already uses when
+    CUDA libraries are missing."""
+    key = (provider or "auto").lower()
+    if "auto" not in _shared_processors:
+        _shared_processors["auto"] = get_processor("auto")
+    shared = _shared_processors["auto"]
+    if "cuda" in key and "CUDAExecutionProvider" not in getattr(shared, "providers", []):
+        if key not in _shared_processors:
+            logger.warning("Building a CUDA processor on demand (not at startup)")
+            _shared_processors[key] = get_processor(provider)
+        return _shared_processors[key]
+    return shared
+
+
+def get_shared_labeler():
+    global _shared_labeler, _labeler_tried
+    if not _labeler_tried:
+        _labeler_tried = True
+        try:
+            from labels import ImageLabeler
+
+            _shared_labeler = ImageLabeler()
+        except Exception as e:
+            logger.warning("Labeling unavailable: %s", e)
+    return _shared_labeler
+
+
 def run_scan(path, provider):
     global _scan_thread
     try:
@@ -162,8 +200,7 @@ def run_scan(path, provider):
             emit({"event": "scan_cancelled", "path": root})
             return
 
-        emit({"event": "model_status", "state": "loading"})
-        processor = get_processor(provider)
+        processor = get_shared_processor(provider)
         processor.thumbnail_dir = str(Path(root) / DATA_DIR_NAME / "thumbnails")
         emit({"event": "model_status", "state": "ready"})
 
@@ -195,20 +232,13 @@ def run_scan(path, provider):
 
 
 def _make_labeler(ctx):
-    """A labeler built ONLY from an already-cached model: the scan path must
-    never wait on the network. If the model is missing we prime the cache in
-    a background thread; the next pass (watch or manual) labels everything."""
+    """The shared labeler when its model is cached; otherwise a background
+    download primes the cache and a later pass labels everything."""
     if ctx["store"].get_meta("setting_labels", "1") != "1":
         return None
-    try:
-        from labels import ImageLabeler
-
-        labeler = ImageLabeler(auto_download=False)
-        if labeler._session is not None:
-            return labeler
-    except Exception as e:
-        logger.warning("Labeling unavailable: %s", e)
-        return None
+    labeler = get_shared_labeler()
+    if labeler is not None and labeler._session is not None:
+        return labeler
     _prime_label_model()
     return None
 
@@ -380,8 +410,16 @@ def _search(req):
 def _get_item(req):
     import views
 
-    ctx = locate_library(req["path"])
-    detail = views.item_detail(ctx["store"], req.get("path", ""))
+    # req["path"] is the ITEM's absolute path (what every view hands to the
+    # viewer); its library is derived from the indexed context, and the
+    # detail lookup uses the library-relative key.
+    file_path = req.get("path", "")
+    ctx = _context_for_file(file_path)
+    if ctx is None:
+        raise ValueError("File is not part of an indexed library")
+    detail = views.item_detail(
+        ctx["store"], pathio.to_relative(file_path, ctx["root"])
+    )
     if detail is None:
         raise ValueError("Item not found")
     return {"item": detail}
@@ -474,7 +512,11 @@ def _set_date_override(req):
 @action("set_edit")
 def _set_edit(req):
     ctx = locate_library(req["path"])
-    ctx["store"].set_media_user_state(req["hash"], edit=req.get("edit"))
+    edit = req.get("edit")
+    # The UI sends the edit document as a JSON-able object; the column is TEXT.
+    if edit is not None and not isinstance(edit, str):
+        edit = json.dumps(edit)
+    ctx["store"].set_media_user_state(req["hash"], edit=edit)
     return {}
 
 
@@ -1016,11 +1058,16 @@ def _watch_pass():
         if (ctx["store"].get_meta("setting_watch", "0") != "1"):
             continue
         try:
+            processor = get_shared_processor("auto")
+            processor.thumbnail_dir = str(Path(ctx["root"]) / DATA_DIR_NAME / "thumbnails")
             ScanPipeline(
                 str(Path(ctx["root"]) / DATA_DIR_NAME / "index.db"),
                 ctx["root"],
+                face_engine=processor,
+                labeler=_make_labeler(ctx),
                 emit=ProgressCoalescer(path=ctx["root"]),
             ).run()
+            ctx["library"].purge_expired_trash()
         except Exception:
             logger.exception("Watch pass failed for %s", ctx["root"])
 
@@ -1118,6 +1165,14 @@ def _warm_heavy_imports():
 def main():
     logger.info("Backend started (v3)")
     _warm_heavy_imports()
+    try:
+        # Construct the default model pipeline here, on the main thread:
+        # ONNX session creation inside worker threads hangs
+        # nondeterministically on this platform.
+        get_shared_processor("auto")
+        get_shared_labeler()
+    except Exception as e:
+        logger.warning("Models not ready at startup: %s", e)
     while True:
         try:
             line = sys.stdin.readline()

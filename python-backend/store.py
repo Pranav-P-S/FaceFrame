@@ -533,10 +533,11 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT fa.id, fa.content_hash, fa.bbox, fa.thumbnail_path,
-                          f.path AS file_path
+                          MIN(f.path) AS file_path
                    FROM faces fa
                    LEFT JOIN files f ON f.content_hash = fa.content_hash
                    WHERE fa.person_id IS NULL
+                   GROUP BY fa.id
                    ORDER BY fa.id
                    LIMIT ?""",
                 (limit,),
