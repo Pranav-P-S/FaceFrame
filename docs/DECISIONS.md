@@ -53,3 +53,21 @@ extension whitelist.
 RAW decoding, video trim/re-encode, auto-movies, portrait blur, LAN sharing.
 All require heavy new dependencies or online services; each is listed in the
 analysis doc with its reason. None blocks the core feature set.
+
+## D9 — The double-check wave: wire, don't descope
+The first double-check found features the backend fully implemented and the
+docs promised but no UI could reach (merge/split/hide/assign people, album
+rename/delete/cover/reorder, collages, creations delete, index restore).
+Backend + e2e already covered them, so the honest fix was finishing the last
+mile in the renderer rather than cutting the docs down.
+
+## D10 — window.prompt is not available in Electron
+It throws, and it silently disabled add-to-album, export and backup. The app
+uses a small in-app text dialog (src/lib/prompt.ts); window.confirm stays —
+Electron implements it.
+
+## D11 — Undecodable is not the same as failed
+A decode failure is retried on later passes: cloud-placeholder and
+still-copying files decode fine on the next scan. Content PIL refuses
+ outright (decompression bomb) is marked analyzed with an `undecodable` flag
+ instead, because the same bytes fail identically forever.

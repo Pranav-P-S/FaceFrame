@@ -102,14 +102,14 @@ handy for development and demos with no Python at all.
 
 ```bash
 # backend units (fast: schema, hashing, scan idempotency, search, places…)
-venv/Scripts/python -m pytest python-backend/tests -q
+npm run test:py
 
 # backend end-to-end, spoken to exactly like the Electron shell does
 npm test
 
 # v3 acceptance suite: idempotent rescans, zero-cost moves, duplicates,
 # albums, trash, locked folder, edits — the feature contract
-venv/Scripts/python scripts/e2e_v3_test.py
+npm run test:e2e:v3
 
 # frontend units (justified layout, query parser, routing, formatting)
 npm run test:unit

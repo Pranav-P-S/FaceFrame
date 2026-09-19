@@ -169,16 +169,17 @@ def main():
         b.request("set_trashed", path=lib, paths=[str(copy)], trashed=False)
 
         print("== captions + search ==")
-        # NOTE: get_item cannot succeed (backend bug: _get_item uses
-        # req["path"] both as the library directory and as the item key, so
-        # locate_library() rejects any item path with NotADirectoryError —
-        # reported separately). Take the content_hash from the feed rows
-        # instead, which carry the same field.
+        # get_item takes the ITEM's absolute path (what every view hands the
+        # viewer) and returns full detail — exercise that contract directly.
+        item_detail = b.request("get_item", path=str(sample))["data"]["item"]
+        content_hash = item_detail["content_hash"]
+        check("get_item resolves an absolute item path", bool(content_hash))
         feed0 = b.request("get_feed", path=lib, view="days")["data"]["groups"]
-        content_hash = next(
+        feed_hash = next(
             i["content_hash"]
             for g in feed0 for i in g["items"] if i["path"].endswith(sample.name)
         )
+        check("get_item content_hash matches the feed row", feed_hash == content_hash)
         b.request("set_caption", path=lib, hash=content_hash, caption="unique zebra capsule")
         hits = b.request("search", path=lib, query="zebra capsule")["data"]["items"]
         check("caption is searchable", len(hits) >= 1)
@@ -197,20 +198,15 @@ def main():
         b.request("delete_album", path=lib, album_id=album_id)
 
         print("== edit round-trip ==")
-        # get_item is the only endpoint that exposes the persisted edit JSON
-        # and it is broken (see note above), so verify the edit through the
-        # edit-aware preview: it must change with the edit and restore on
-        # revert.
+        # Verify the edit through the edit-aware preview: it must change with
+        # the edit and restore on revert.
         base = b.request(
             "get_image_preview", file_path=str(sample), max_dim=400
         )["data"]["data_url"]
         edit = {"rotate": 90}
-        # NOTE: set_edit cannot accept the edit object the UI sends
-        # (api.ts passes a dict; _set_edit binds it into sqlite unserialized
-        # -> ProgrammingError, reported separately), so pre-serialize it the
-        # way it ends up stored in the media.edit TEXT column.
-        edit_json = json.dumps(edit)
-        b.request("set_edit", path=lib, hash=content_hash, edit=edit_json)
+        # Mirror the renderer contract: set_edit accepts the edit document
+        # as a JSON object and serializes it server-side.
+        b.request("set_edit", path=lib, hash=content_hash, edit=edit)
         prev = b.request("get_image_preview", file_path=str(sample), max_dim=400)["data"]["data_url"]
         check("edited preview renders", prev.startswith("data:image/jpeg;base64,"))
         check("edit changes the rendered preview", prev != base)
@@ -247,7 +243,7 @@ def main():
         )
         b.request("set_trashed", path=lib, hashes=[h2], trashed=True)
         trashed = b.request("get_trashed", path=lib)["data"]["items"]
-        check("trashed item listed", any(i["hash"] == h2 for i in trashed))
+        check("trashed item listed", any(i["content_hash"] == h2 for i in trashed))
         b.request("set_trashed", path=lib, hashes=[h2], trashed=False)
         feed_final = b.request("get_feed", path=lib, view="days")["data"]["groups"]
         check("restored item back in feed",
