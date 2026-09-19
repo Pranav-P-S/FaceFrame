@@ -10,7 +10,6 @@ import logging
 import time
 from pathlib import Path
 
-import pathio
 from hashing import content_hash
 from store import Store
 

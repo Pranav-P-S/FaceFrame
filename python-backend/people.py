@@ -14,7 +14,6 @@ DLLs from a worker thread deadlocks on Windows (see main._warm_heavy_imports).
 import json
 import logging
 import re
-import time
 
 import numpy as np
 from sklearn.cluster import DBSCAN

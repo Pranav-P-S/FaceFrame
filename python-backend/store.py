@@ -159,7 +159,9 @@ class Store:
             )
 
     def remove_file(self, path: str):
-        """Drop a file row; GC the media row if it lost its last reference."""
+        """Drop a file row; GC the media row if it lost its last reference.
+        The full-text rows for the path go with it, so deletions (trash,
+        resolve_missing, …) don't leave stale search entries behind."""
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT content_hash FROM files WHERE path=?", (path,)
@@ -173,6 +175,14 @@ class Store:
                     conn.execute(
                         "DELETE FROM media WHERE content_hash=?", (row[0],)
                     )
+            # Full-text rows follow the file (media_fts shares the fts_map
+            # rowid — see sync_fts).
+            old = conn.execute(
+                "SELECT rowid FROM fts_map WHERE path=?", (path,)
+            ).fetchone()
+            conn.execute("DELETE FROM fts_map WHERE path=?", (path,))
+            if old:
+                conn.execute("DELETE FROM media_fts WHERE rowid=?", (old[0],))
 
     def all_files(self):
         with self.connect() as conn:
@@ -574,6 +584,7 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT f.path, f.content_hash, COUNT(fa.id) AS face_count,
+                          m.kind, m.width, m.height,
                           COALESCE(m.date_override, m.capture_time) AS ts
                    FROM faces fa
                    JOIN files f ON f.content_hash = fa.content_hash

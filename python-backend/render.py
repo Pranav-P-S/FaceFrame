@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 
-import pathio
 
 logger = logging.getLogger("FaceFrame.Render")
 

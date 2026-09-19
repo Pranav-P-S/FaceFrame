@@ -225,6 +225,14 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
             where.append("COALESCE(m.date_override, m.capture_time) < ?")
             params.append(epoch)
 
+    for value in parsed.get("on"):
+        span = _date_span(value)
+        if span is not None:
+            where.append("COALESCE(m.date_override, m.capture_time) >= ?")
+            params.append(span[0])
+            where.append("COALESCE(m.date_override, m.capture_time) < ?")
+            params.append(span[1])
+
     sql = base_sql
     for clause in where:
         sql += f" AND {clause}"
@@ -252,6 +260,29 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
         item["flags"] = _flags(item.get("flags"))
         item["labels"] = _labels(item.get("labels"))
     return {"items": items, "total": len(items), "filters": parsed.filters}
+
+
+def _date_span(value: str):
+    """(start, end) epoch pair covering the whole UTC day / month / year for
+    an on: literal. Kept separate from _date_to_epoch because before: is
+    anchored at a period START (exclusive), not its end."""
+    value = value.strip()
+    for fmt, length in (("%Y-%m-%d", 10), ("%Y-%m", 7), ("%Y", 4)):
+        if len(value) >= length:
+            try:
+                begin = calendar.timegm(time.strptime(value[:length], fmt))
+            except ValueError:
+                continue
+            year = int(value[:4])
+            if fmt == "%Y-%m-%d":
+                return begin, begin + 86400
+            if fmt == "%Y-%m":
+                month = int(value[5:7])
+                next_y, next_m = (year + 1, 1) if month == 12 else (year, month + 1)
+            else:
+                next_y, next_m = year + 1, 1
+            return begin, calendar.timegm((next_y, next_m, 1, 0, 0, 0, 0, 0, 0))
+    return None
 
 
 def _date_to_epoch(value: str, start: bool):
@@ -302,7 +333,14 @@ def item_detail(store, path: str):
                  AND trashed_at IS NULL""",
             (file_row["content_hash"], path),
         ).fetchall()
+        creation_id = None
+        if file_row["kind"] == "creation":
+            row = conn.execute(
+                "SELECT id FROM creations WHERE path=?", (path,)
+            ).fetchone()
+            creation_id = row["id"] if row else None
     detail = dict(file_row)
+    detail["creation_id"] = creation_id
     detail["media"] = dict(media_row) if media_row else None
     detail["faces"] = [dict(f) for f in faces]
     detail["albums"] = [dict(a) for a in albums]

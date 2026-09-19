@@ -25,7 +25,6 @@ MODEL_URL = (
 CLASSES_URL = (
     "https://raw.githubusercontent.com/pytorch/hub/v0.12.0/imagenet_classes.txt"
 )
-MODEL_SHA256 = None  # populated on first verified download (see _ensure_model)
 _KNOWN_DIGESTS = {}  # url -> sha256 hex, filled after a verified first fetch
 
 # A label is kept when it carries at least this softmax share; the single top
@@ -43,6 +42,7 @@ class ImageLabeler:
         auto_download: bool = True,
         session=None,
         class_names: list | None = None,
+        download_only: bool = False,
     ):
         self._session = session
         self._class_names = class_names
@@ -63,6 +63,10 @@ class ImageLabeler:
             try:
                 if auto_download:
                     _ensure_model(model_path, classes_path)
+                if download_only:
+                    # Fetch/verify the files only; the ONNX session is built
+                    # later where the scan runs (see main._prime_label_model).
+                    return
                 if model_path.is_file() and classes_path.is_file():
                     import onnxruntime
 

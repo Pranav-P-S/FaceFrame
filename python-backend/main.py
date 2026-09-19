@@ -24,7 +24,7 @@ from creations import delete_creation, make_animation, make_collage
 from library import LibraryService
 from people import PeopleService
 from render import magic_eraser_preview, render_preview
-from scan import DATA_DIR_NAME, VALID_EXTENSIONS, ScanPipeline
+from scan import DATA_DIR_NAME, ScanPipeline
 from store import Store
 
 logging.basicConfig(
@@ -237,8 +237,11 @@ def run_scan(path, provider):
 
         stats = pipeline.run()
 
+        # scan.py already emitted scan_complete / scan_cancelled with full
+        # stats through the coalescer — no re-emit here, it would arrive
+        # twice (and without the processed alias) in the renderer.
         if stats.get("cancelled"):
-            emit({"event": "scan_cancelled", "path": root})
+            logger.info("Scan cancelled: %s", root)
     except Exception as e:
         logger.exception("Scan failed")
         emit({"event": "scan_error", "message": str(e)})
@@ -272,10 +275,15 @@ def _prime_label_model():
         _label_primed = True
 
     def download():
+        global _labeler_tried
         try:
             from labels import ImageLabeler
 
-            ImageLabeler(auto_download=True)
+            # Files only — never build the ONNX session in this daemon
+            # thread. The shared labeler is constructed where a scan runs,
+            # exactly like a first scan without a cached model.
+            ImageLabeler(auto_download=True, download_only=True)
+            _labeler_tried = False
             logger.info("Label model cached; labels will apply on the next scan")
         except Exception as e:
             logger.warning("Label model download failed: %s", e)
@@ -401,11 +409,13 @@ def _get_feed(req):
     import views
 
     ctx = locate_library(req["path"])
+    archived_only = bool(req.get("archived_only"))
     groups = views.feed_groups(
         ctx["store"],
         view=req.get("view", "days"),
         include_locked=bool(req.get("include_locked")),
-        include_archived=bool(req.get("include_archived")),
+        include_archived=bool(req.get("include_archived")) or archived_only,
+        archived_only=archived_only,
         favorite=req.get("favorite"),
         limit=max(1, min(int(req.get("limit", 4000)), 20000)),
     )
@@ -736,14 +746,16 @@ def _any_path(ctx, content_hash):
 @action("get_persons")
 def _get_persons(req):
     ctx = locate_library(req["path"])
+    include_hidden = bool(req.get("include_hidden"))
     persons = []
-    for row in ctx["people"].list_persons():
+    for row in ctx["people"].list_persons(include_hidden=include_hidden):
         persons.append(
             {
                 "id": row["id"],
                 "name": row["name"] or f"Person {row['id']}",
                 "thumbnail": _abs(ctx, row["thumbnail_path"]),
                 "face_count": row["face_count"],
+                "hidden": bool(row["hidden"]),
             }
         )
     return {"persons": persons}
@@ -773,10 +785,30 @@ def _get_photos_by_person(req):
             "path": _abs(ctx, row["path"]),
             "content_hash": row["content_hash"],
             "face_count": row["face_count"],
+            "kind": row["kind"] or "photo",
+            "width": row["width"],
+            "height": row["height"],
         }
         for row in ctx["people"].person_photos(req["person_id"])
     ]
     return {"photos": photos}
+
+
+@action("get_person_faces")
+def _get_person_faces(req):
+    """Per-face rows for one person: the split and feature-photo flows pick
+    from these (photos group multiple faces, faces are the real unit)."""
+    ctx = locate_library(req["path"])
+    faces = []
+    for row in ctx["people"].person_faces(req["person_id"]):
+        faces.append(
+            {
+                "id": row["id"],
+                "content_hash": row["content_hash"],
+                "thumbnail": _abs(ctx, row["thumbnail_path"]),
+            }
+        )
+    return {"faces": faces}
 
 
 @action("rename_person")
@@ -791,7 +823,16 @@ def _merge_persons(req):
     ctx = locate_library(req["path"])
     stale = ctx["people"].merge_persons(req["keep_id"], req["merge_id"])
     if stale:
-        _unlink_quietly(_abs(ctx, stale))
+        # The losing person's thumbnail may still be referenced by a surviving
+        # face row (person thumbnails are chosen among face crops); only unlink
+        # when nothing points at it any more, or check_index would report a
+        # missing thumb forever.
+        still_referenced = any(
+            row["thumbnail_path"] for row in ctx["people"].person_faces(req["keep_id"])
+            if row["thumbnail_path"] == stale
+        )
+        if not still_referenced:
+            _unlink_quietly(_abs(ctx, stale))
     return {}
 
 
@@ -821,7 +862,13 @@ def _set_person_hidden(req):
 @action("set_person_thumbnail")
 def _set_person_thumbnail(req):
     ctx = locate_library(req["path"])
-    ctx["people"].set_person_thumbnail(req["person_id"], req["thumbnail"])
+    thumb = req["thumbnail"]
+    # The renderer only knows absolute paths; store the library-relative form
+    # so the library stays movable.
+    if os.path.isabs(thumb):
+        resolved = ctx["library"]._contained(thumb)
+        thumb = pathio.to_relative(str(resolved), ctx["root"])
+    ctx["people"].set_person_thumbnail(req["person_id"], thumb.replace("\\", "/"))
     return {}
 
 
@@ -839,6 +886,19 @@ def _get_image_preview(req):
     if ctx is None:
         raise ValueError("File is not part of an indexed library")
     rel = pathio.to_relative(file_path, ctx["root"])
+
+    # Face thumbnails live under .faceframe/thumbnails, never get a files row
+    # (the scanner skips .faceframe), and the media:// protocol refuses that
+    # tree — so this is the only channel that can serve them. They are
+    # already-encoded JPEGs: hand the bytes straight back.
+    norm_rel = rel.replace("\\", "/")
+    if norm_rel.startswith(".faceframe/thumbnails/") and norm_rel.endswith(".jpg"):
+        thumbs_root = (Path(ctx["root"]) / ".faceframe" / "thumbnails").resolve()
+        thumb = (Path(ctx["root"]) / norm_rel).resolve()
+        if thumb.parent != thumbs_root or not thumb.is_file():
+            raise ValueError("Thumbnail not found")
+        data = base64.b64encode(thumb.read_bytes()).decode("ascii")
+        return {"data_url": f"data:image/jpeg;base64,{data}"}
 
     edit = req.get("edit")
     if edit is None:
@@ -957,8 +1017,16 @@ def _get_memories(req):
     ctx = locate_library(req["path"])
     raw = memories_mod.build_memories(ctx["store"])
     for memory in raw:
-        memory["items"] = [_as_item(ctx, {"path": p, "content_hash": h}) for p, h in
-                           ((i["path"], i["content_hash"]) for i in memory["items"])]
+        items = []
+        for p, h in ((i["path"], i["content_hash"]) for i in memory["items"]):
+            item = {"path": p, "content_hash": h}
+            media = ctx["store"].get_media(h)
+            if media:
+                item["kind"] = media["kind"] or "photo"
+                item["width"] = media["width"]
+                item["height"] = media["height"]
+            items.append(_as_item(ctx, item))
+        memory["items"] = items
         memory["cover"] = _abs(ctx, _cover_rel(ctx, memory.get("cover_hash")))
     return {"memories": raw}
 
@@ -1031,7 +1099,9 @@ def _check_index(req):
             """SELECT COUNT(*) FROM files
                WHERE missing=0 AND trashed_at IS NULL"""
         ).fetchone()[0]
-    report["fts_drift"] = max(0, report["live_files"] - report["fts_rows"])
+    # Absolute drift: deletions used to leave FTS rows behind, which the old
+    # one-directional max(0, …) could never see.
+    report["fts_drift"] = abs(report["live_files"] - report["fts_rows"])
     if req.get("repair"):
         ctx["store"].prune_orphan_media()
         ctx["store"].sync_fts()
@@ -1059,8 +1129,15 @@ def _backup_index(req):
     out = dest_path / f"{Path(ctx['root']).name}-{stamp}.faceframe.zip"
 
     snapshot = data_dir / "index.snapshot.db"
-    with _sq.connect(str(data_dir / "index.db")) as src, _sq.connect(str(snapshot)) as dst:
-        src.backup(dst)
+    # sqlite3's context manager only commits — close explicitly or the
+    # snapshot handle stays open and the unlink below fails on Windows.
+    src_conn = _sq.connect(str(data_dir / "index.db"))
+    dst_conn = _sq.connect(str(snapshot))
+    try:
+        src_conn.backup(dst_conn)
+    finally:
+        dst_conn.close()
+        src_conn.close()
     try:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(snapshot, "index.db")
@@ -1084,7 +1161,8 @@ def _backup_index(req):
 @action("restore_index")
 def _restore_index(req):
     """Swap in a previously backed-up index. Guarded by the busy check like
-    every mutating action, and refuses paths outside the library folder."""
+    every mutating action; the backup file itself may live anywhere the user
+    points at, but archive members may only land inside the library."""
     import zipfile
 
     ctx = locate_library(req["path"])
@@ -1095,6 +1173,7 @@ def _restore_index(req):
         raise RuntimeError("Another operation is still running")
     data_dir = Path(ctx["root"]) / DATA_DIR_NAME
     data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir_resolved = data_dir.resolve()
     with zipfile.ZipFile(src) as zf:
         names = zf.namelist()
         if "index.db" not in names:
@@ -1107,7 +1186,12 @@ def _restore_index(req):
         zf.extract("index.db", data_dir)
         for name in names:
             if name.startswith("thumbnails/"):
-                out = data_dir / name
+                # Manual extraction gets no zipfile sanitization: refuse any
+                # member that would land outside the data dir (zip-slip).
+                out = (data_dir / name).resolve()
+                if not out.is_relative_to(data_dir_resolved):
+                    logger.warning("Backup member escapes the library, skipped: %s", name)
+                    continue
                 out.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(name) as fsrc, open(out, "wb") as fdst:
                     fdst.write(fsrc.read())
@@ -1216,9 +1300,12 @@ def _get_settings(req):
 def _set_settings(req):
     ctx = locate_library(req["path"])
     settings = req.get("settings") or {}
-    for key, value in settings.items():
+    for key in settings:
         if not key.startswith("setting_"):
             raise ValueError(f"Bad setting key: {key}")
+    # Validate everything before writing anything, so a bad key can't leave
+    # the request half-applied.
+    for key, value in settings.items():
         ctx["store"].set_meta(key, str(value))
     if "setting_watch" in settings:
         _watcher.set_enabled(
@@ -1269,10 +1356,7 @@ def _watch_pass():
                 _abort_scan.clear()
                 stats = pipeline.run()
                 ctx["library"].purge_expired_trash()
-                if not stats.get("cancelled"):
-                    emit({"event": "scan_complete", "path": ctx["root"], **stats})
-                else:
-                    emit({"event": "scan_cancelled", "path": ctx["root"]})
+                # scan.py emits scan_complete / scan_cancelled itself.
             except Exception:
                 logger.exception("Watch pass failed for %s", ctx["root"])
     finally:
@@ -1290,13 +1374,16 @@ _watcher = Watcher(_watch_pass)
 # ---------------------------------------------------------------------------
 
 def _as_item(ctx, row):
-    """Normalize a files/media row into the wire item shape (absolute path)."""
+    """Normalize a files/media row into the wire item shape (absolute path).
+    The renderer contract is `content_hash` — keep that name, not `hash`."""
     row = dict(row)
     return {
         "path": _abs(ctx, row.get("path")),
-        "hash": row.get("content_hash"),
+        "content_hash": row.get("content_hash"),
         "kind": row.get("kind") or row.get("media_kind") or "photo",
         "ts": row.get("ts") or row.get("trashed_at"),
+        "width": row.get("width"),
+        "height": row.get("height"),
     }
 
 
@@ -1331,6 +1418,7 @@ def _clear_index(req):
         _contexts.pop(str(Path(path).resolve()), None)
     reply(req.get("id"), True, {})
     emit({"event": "index_cleared", "path": str(library)})
+    return _RESPONDED
 
 
 _RESPONDED = object()  # sentinel: the handler already replied from a thread

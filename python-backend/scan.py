@@ -209,10 +209,27 @@ class ScanPipeline:
         }
 
         if kind == "photo":
-            img = read_image_bgr(abs_path)
+            try:
+                img = read_image_bgr(abs_path)
+            except UndecodableImage as e:
+                # Permanently undecodable (decompression bomb): index it
+                # without a render instead of re-failing every scan forever.
+                # The tile shows a broken image; the row exists so the user
+                # can act on it. Same bytes always fail the same way.
+                logger.warning("Undecodable photo, indexing without a render: %s (%s)", abs_path, e)
+                meta["analysis_state"] = "analyzed"
+                meta["flags"] = _dumps({"undecodable": True})
+                self.store.upsert_media(meta)
+                self.store.upsert_file(
+                    rel_path, hash_hex, stat.st_mtime, stat.st_size, kind=kind,
+                    added_at=added_at,
+                )
+                return
             if img is None:
+                # Transient (vanished mid-pass, IO contention, a cloud
+                # placeholder still materializing): retry on a later pass.
                 logger.warning("Undecodable, left for a later pass: %s", abs_path)
-                return  # no file row: next pass retries
+                return
             height, width = img.shape[:2]
             meta["width"], meta["height"] = int(width), int(height)
             from hashing import perceptual_hash
@@ -244,6 +261,7 @@ class ScanPipeline:
         else:
             video_meta = self._process_video(abs_path, hash_hex)
             if video_meta is None:
+                logger.warning("Unreadable video, left for a later pass: %s", abs_path)
                 return
             meta.update(video_meta)
             stats["videos"] += 1
@@ -454,12 +472,6 @@ def _dumps(value) -> str:
     return value if isinstance(value, str) else json.dumps(value)
 
 
-def json_loads(value):
-    import json
-
-    return json.loads(value)
-
-
 def _unlink(path: Path):
     try:
         path.unlink()
@@ -467,8 +479,15 @@ def _unlink(path: Path):
         pass
 
 
+class UndecodableImage(Exception):
+    """Content that can NEVER decode (e.g. past PIL's decompression-bomb
+    guard): re-decoding it on a later pass is pointless."""
+
+
 def read_image_bgr(image_path: str):
-    """Decode an image honoring EXIF orientation, as BGR. None on failure."""
+    """Decode an image honoring EXIF orientation, as BGR. None on transient
+    failure; raises UndecodableImage when the content is permanently
+    undecodable."""
     import cv2
     import numpy as np
     from PIL import Image, ImageOps
@@ -482,6 +501,8 @@ def read_image_bgr(image_path: str):
     except FileNotFoundError:
         logger.warning("File vanished during scan: %s", image_path)
         return None
+    except Image.DecompressionBombError as e:
+        raise UndecodableImage(str(e)) from e
     except Exception as e:
         logger.warning("Could not decode %s: %s", image_path, e)
         return None

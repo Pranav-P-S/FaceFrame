@@ -10,7 +10,6 @@ two flavors with distinct names on purpose:
 """
 
 import hashlib
-import json
 import logging
 import os
 import secrets
@@ -146,7 +145,8 @@ class LibraryService:
     def trashed_items(self):
         with self.store.connect() as conn:
             return conn.execute(
-                """SELECT f.path, f.content_hash, f.trashed_at, m.kind
+                """SELECT f.path, f.content_hash, f.trashed_at, m.kind,
+                          m.width, m.height
                    FROM files f JOIN media m ON m.content_hash=f.content_hash
                    WHERE f.trashed_at IS NOT NULL
                    ORDER BY f.trashed_at DESC"""
@@ -263,6 +263,7 @@ class LibraryService:
         with self.store.connect() as conn:
             return conn.execute(
                 """SELECT f.path, f.content_hash, m.kind AS media_kind,
+                          m.width, m.height,
                           COALESCE(m.date_override, m.capture_time, f.mtime) AS ts
                    FROM files f
                    JOIN media m ON m.content_hash=f.content_hash
