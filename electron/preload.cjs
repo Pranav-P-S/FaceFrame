@@ -30,22 +30,11 @@ contextBridge.exposeInMainWorld('faceframe', {
     ipcRenderer.invoke('scan-directory', path, provider),
   cancelScan: () => ipcRenderer.invoke('cancel-scan'),
   clusterFaces: (path) => ipcRenderer.invoke('cluster-faces', path),
-  openLibrary: (path) => ipcRenderer.invoke('open-library', path),
-
-  getPersons: (path) => ipcRenderer.invoke('get-persons', path),
-  getUnclusteredFaces: (path) => ipcRenderer.invoke('get-unclustered-faces', path),
-  getPhotosByPerson: (path, personId) =>
-    ipcRenderer.invoke('get-photos-by-person', path, personId),
-  renamePerson: (path, personId, newName) =>
-    ipcRenderer.invoke('rename-person', path, personId, newName),
-  mergePersons: (path, keepId, mergeId) =>
-    ipcRenderer.invoke('merge-persons', path, keepId, mergeId),
   clearIndex: (path) => ipcRenderer.invoke('clear-index', path),
+  openLibrary: (path) => ipcRenderer.invoke('open-library', path),
 
   backendState: () => ipcRenderer.invoke('backend-state'),
   retryBackend: () => ipcRenderer.invoke('retry-backend'),
-  readImageDataUrl: (path, maxDim) =>
-    ipcRenderer.invoke('read-image-data-url', path, maxDim),
 
   onBackendEvent: (callback) => {
     backendEventHandler = callback;

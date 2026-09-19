@@ -143,8 +143,17 @@ function registerMediaProtocol() {
       if (range) {
         const match = /bytes=(\d*)-(\d*)/.exec(range);
         if (match) {
-          const start = match[1] ? parseInt(match[1], 10) : 0;
-          const end = match[2] ? Math.min(parseInt(match[2], 10), stat.size - 1) : stat.size - 1;
+          // RFC 7233: "bytes=-N" is a suffix range — the LAST N bytes.
+          let start;
+          let end;
+          if (!match[1] && match[2]) {
+            const suffix = parseInt(match[2], 10);
+            start = Math.max(0, stat.size - suffix);
+            end = stat.size - 1;
+          } else {
+            start = match[1] ? parseInt(match[1], 10) : 0;
+            end = match[2] ? Math.min(parseInt(match[2], 10), stat.size - 1) : stat.size - 1;
+          }
           if (start >= stat.size || start > end) {
             return new Response(null, {
               status: 416,
@@ -329,13 +338,15 @@ function startPythonBackend() {
       pythonProcess.stdout.on('error', () => {});
       pythonProcess.stderr.on('error', () => {});
 
-      let stdoutBuffer = '';
+      // NDJSON over a pipe: chunk boundaries can split a multi-byte UTF-8
+      // sequence, so accumulate Buffers and only decode complete lines.
+      let stdoutBuffer = Buffer.alloc(0);
       pythonProcess.stdout.on('data', (chunk) => {
-        stdoutBuffer += chunk.toString();
+        stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
         let newlineIndex;
-        while ((newlineIndex = stdoutBuffer.indexOf('\n')) !== -1) {
-          const line = stdoutBuffer.slice(0, newlineIndex).trim();
-          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        while ((newlineIndex = stdoutBuffer.indexOf(0x0a)) !== -1) {
+          const line = stdoutBuffer.subarray(0, newlineIndex).toString('utf8').trim();
+          stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
           if (line) handleBackendLine(line);
         }
       });
@@ -454,10 +465,19 @@ function sendToPython(message) {
 
 function requireBackend() {
   if (!backendReady) {
+    const reasonText = {
+      'python-not-found':
+        'Python was not found. Install Python 3.10+ and create the venv (see README).',
+      'backend-repeated-crash':
+        'The Python backend crashed repeatedly and has stopped. Use "Try again" on the banner to restart it.',
+      'backend-timeout':
+        'The Python backend did not become ready in time and was stopped. Use "Try again" to restart it.',
+      'backend-exited':
+        'The Python backend has exited. Use "Try again" to restart it.',
+    };
     throw new Error(
-      backendError === 'python-not-found'
-        ? 'Python was not found. Install Python 3.10+ and create the venv (see README).'
-        : 'The Python backend is still starting. Try again in a moment.'
+      reasonText[backendError] ||
+        'The Python backend is not running. Use "Try again" to restart it.'
     );
   }
 }
@@ -506,37 +526,17 @@ function registerIpc() {
   }));
   passThrough('cancel-scan', () => ({ action: 'cancel_scan' }));
   passThrough('cluster-faces', (folder) => ({ action: 'cluster', path: folder }));
-  passThrough('get-persons', (folder) => ({ action: 'get_persons', path: folder }));
-  passThrough('get-unclustered-faces', (folder) => ({
-    action: 'get_unclustered',
-    path: folder,
-  }));
-  passThrough('get-photos-by-person', (folder, personId) => ({
-    action: 'get_photos_by_person',
-    path: folder,
-    person_id: personId,
-  }));
-  passThrough('rename-person', (folder, personId, newName) => ({
-    action: 'rename_person',
-    path: folder,
-    person_id: personId,
-    new_name: newName,
-  }));
-  passThrough('merge-persons', (folder, keepId, mergeId) => ({
-    action: 'merge_persons',
-    path: folder,
-    keep_id: keepId,
-    merge_id: mergeId,
-  }));
   passThrough('clear-index', (folder) => ({ action: 'clear_index', path: folder }));
   passThrough('open-library', (folder) => ({ action: 'open_library', path: folder }));
 
   ipcMain.handle('backend-state', () => lastBackendStatus);
 
   // The setup screen's retry: a page reload cannot revive the backend,
-  // only a fresh spawn can.
+  // only a fresh spawn can. A deliberate retry also resets the crash
+  // budget, so "Try again" gets a full set of spawns with backoff.
   ipcMain.handle('retry-backend', async () => {
     if (backendReady) return { state: 'ready' };
+    if (backendError === 'backend-repeated-crash') consecutiveCrashes = 0;
     if (restartTimer) {
       clearTimeout(restartTimer);
       restartTimer = null;
@@ -545,24 +545,6 @@ function registerIpc() {
       startPythonBackend();
     }
     return { state: 'starting' };
-  });
-
-  // Images travel through the Python backend's preview pipeline, which
-  // downscales into a per-library cache: bounded memory, and formats the
-  // renderer cannot display (TIFF) become viewable.
-  ipcMain.handle('read-image-data-url', async (_event, filePath, maxDim = 640) => {
-    if (!backendReady) return null;
-    try {
-      return await sendToPython({
-        action: 'get_image_preview',
-        id: nextRequestId++,
-        file_path: filePath,
-        max_dim: maxDim,
-      }).then((data) => data.data_url);
-    } catch (e) {
-      console.error('read-image-data-url failed:', e.message);
-      return null;
-    }
   });
 }
 
@@ -593,8 +575,18 @@ function createWindow() {
   mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error(`[window] failed to load ${url}: ${code} ${desc}`);
   });
+  let rendererGoneCount = 0;
   mainWindow.webContents.on('render-process-gone', (_e, details) => {
     console.error(`[window] renderer gone: ${details.reason}`);
+    // A crashed renderer leaves a dead frozen surface; reload it instead of
+    // making the user kill the app. The counter keeps a crash loop from
+    // spinning forever.
+    if (rendererGoneCount < 5) {
+      rendererGoneCount += 1;
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+      }, 500);
+    }
   });
   mainWindow.webContents.on('console-message', (_e, level, message, line, source) => {
     if (level >= 2) console.error(`[renderer] ${message} (${source}:${line})`);
@@ -635,7 +627,9 @@ if (!gotLock) {
   });
 
   app.on('window-all-closed', () => {
-    app.quit();
+    // Platform convention: on macOS apps stay alive in the dock until the
+    // user quits, and 'activate' can re-create the window.
+    if (process.platform !== 'darwin') app.quit();
   });
 
   app.on('before-quit', () => {

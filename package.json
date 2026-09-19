@@ -1,6 +1,6 @@
 {
   "name": "faceframe",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local face detection and photo organization app",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "test:e2e": "node scripts/run-backend-e2e.mjs",
     "test:unit": "vitest run",
     "test:e2e:v3": "node scripts/run-backend-e2e.mjs v3",
-    "test:py": "venv/Scripts/python.exe -m pytest python-backend/tests -q"
+    "test:py": "node scripts/run-py-tests.mjs"
   },
   "dependencies": {
     "leaflet": "^1.9.4",
@@ -59,15 +59,18 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "resources/icon.png"
     },
     "linux": {
       "target": "AppImage",
-      "category": "Graphics"
+      "category": "Graphics",
+      "icon": "resources/icon.png"
     },
     "mac": {
       "target": "dmg",
-      "category": "public.app-category.photography"
+      "category": "public.app-category.photography",
+      "icon": "resources/icon.png"
     }
   }
 }
