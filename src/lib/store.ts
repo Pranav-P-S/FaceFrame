@@ -36,7 +36,7 @@ interface AppState {
   refresh: () => void;
   toggleSelect: (path: string, hash?: string) => void;
   selectRange: (paths: string[], anchor: string) => void;
-  selectAll: (paths: string[]) => void;
+  selectAll: (paths: string[], hashes?: Record<string, string>) => void;
   clearSelection: () => void;
   openViewer: (items: Item[], index: number) => void;
   closeViewer: () => void;
@@ -111,7 +111,14 @@ export const useStore = create<AppState>((set, get) => ({
     }
     set({ selection: new Set(slice), selectionOrder: slice, anchor, selectionHashes: hashes });
   },
-  selectAll: (paths) => set({ selection: new Set(paths), selectionOrder: [...paths] }),
+  selectAll: (paths, hashes) =>
+    set((s) => ({
+      selection: new Set(paths),
+      selectionOrder: [...paths],
+      // Remember hashes up front (Ctrl+A on a huge feed must not degrade to
+      // one getItem round trip per path when the selection bar needs them).
+      selectionHashes: hashes ?? s.selectionHashes,
+    })),
   clearSelection: () => set({ selection: new Set(), selectionOrder: [], anchor: null, selectionHashes: {} }),
 
   openViewer: (items, index) => set({ viewer: { items, index } }),
@@ -140,5 +147,8 @@ function flatHashLookup(state: unknown, path: string): string | undefined {
 }
 
 window.addEventListener('hashchange', () => {
-  useStore.setState({ route: parseHash(window.location.hash) });
+  // Single choke point for route changes — including raw href navigation
+  // that bypasses navigate(). Selection never survives a page change: the
+  // selection bar would otherwise target items that are no longer on screen.
+  useStore.setState({ route: parseHash(window.location.hash), selection: new Set(), selectionOrder: [], anchor: null, selectionHashes: {} });
 });

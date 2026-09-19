@@ -63,28 +63,37 @@ export default function Editor({
     setEditState((prev) => ({ ...prev, ...patch }));
   }, []);
 
-  // Debounced backend-rendered preview with the candidate edit.
+  // Debounced backend-rendered preview with the candidate edit. Eraser rects
+  // are normalized to the FULL original — the backend inpaints before any
+  // geometry — so the eraser tab previews the original image; every other
+  // tab previews the composed edit. An empty local edit previews the
+  // ORIGINAL too, not the stored one.
   useEffect(() => {
+    let cancelled = false;
     if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(async () => {
       setBusy(true);
       try {
+        const showOriginal = tab === 'eraser';
         const hasEdit = Object.keys(edit).length > 0 || rects.length > 0;
         const res = await api().request('get_image_preview', {
           file_path: filePath,
           max_dim: 1600,
-          // An empty local edit must preview the ORIGINAL, not the stored one
-          ...(hasEdit ? { edit } : { apply_edit: false }),
+          ...(showOriginal || !hasEdit ? { apply_edit: false } : { edit }),
         });
+        if (cancelled) return;
         setPreview((res as { data_url?: string }).data_url ?? null);
+      } catch {
+        if (!cancelled) setPreview(null);
       } finally {
-        setBusy(false);
+        if (!cancelled) setBusy(false);
       }
     }, 180);
     return () => {
+      cancelled = true;
       if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
     };
-  }, [edit, filePath]);
+  }, [edit, rects, tab, filePath]);
 
   const save = async () => {
     const hasEdit = Object.keys(edit).length > 0 || rects.length > 0;
@@ -247,7 +256,10 @@ export default function Editor({
                       return;
                     }
                     const [rw, rh] = preset === '1:1' ? [1, 1] : preset === '4:3' ? [4, 3] : [16, 9];
-                    const srcAspect = width / height;
+                    // The crop applies before rotation, so a 90°/270° photo
+                    // needs the preset's aspect measured on the rotated frame.
+                    const rotated = ((edit.rotate ?? 0) % 180) !== 0;
+                    const srcAspect = (rotated ? height / width : width / height);
                     let cw = 1;
                     let ch = 1;
                     if (srcAspect > rw / rh) cw = (rw / rh) / srcAspect;

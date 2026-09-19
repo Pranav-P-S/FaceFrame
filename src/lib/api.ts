@@ -41,9 +41,12 @@ export const backend = {
   albumRemove: (albumId: number, hashes: string[]) => call('album_remove', { album_id: albumId, hashes }),
   getAlbum: (albumId: number) => call('get_album', { album_id: albumId }),
   setAlbumSort: (albumId: number, sort: string) => call('set_album_sort', { album_id: albumId, sort }),
+  albumReorder: (albumId: number, hashes: string[]) => call('album_reorder', { album_id: albumId, hashes }),
 
-  getPersons: (path: string) => call('get_persons', { path }),
+  getPersons: (path: string) => call('get_persons', { path, include_hidden: true }),
   getUnclustered: (path: string) => call('get_unclustered', { path }),
+  getPersonFaces: (path: string, personId: number) =>
+    call('get_person_faces', { path, person_id: personId }),
   getPhotosByPerson: (path: string, personId: number) =>
     call('get_photos_by_person', { path, person_id: personId }),
   renamePerson: (path: string, personId: number, newName: string) =>
@@ -59,7 +62,9 @@ export const backend = {
   setPersonThumbnail: (path: string, personId: number, thumbnail: string) =>
     call('set_person_thumbnail', { path, person_id: personId, thumbnail }),
 
-  magicEraser: (filePath: string, rects: number[][]) => call('magic_eraser', { file_path: filePath, rects }),
+  // The magic eraser works through the edit document (set_edit with eraser
+  // rects); the standalone magic_eraser action is not part of the UI flow.
+
   getPlaces: (geocode: boolean) => call('get_places', { geocode }),
   getMemories: () => call('get_memories'),
   getDuplicates: () => call('get_duplicates'),
@@ -83,9 +88,9 @@ export const backend = {
 // sites don't have to thread it through every wrapper.
 const FILE_SCOPED_ACTIONS = new Set(['get_item', 'get_image_preview', 'magic_eraser']);
 
-// get_feed/search are the two views whose SQL returns library-RELATIVE file
-// paths (every other handler absolutizes via _as_item). The UI contract is
-// absolute paths (see types.ts), so re-anchor them to the library root here.
+// get_feed/search responses carry library-relative paths in their SQL rows;
+// every other handler absolutizes server-side. Re-anchor the two view
+// actions here so the UI contract (types.ts) is absolute paths everywhere.
 function isAbsolutePath(p: string): boolean {
   return /^([a-zA-Z]:[\\/]|\/|\\\\)/.test(p);
 }

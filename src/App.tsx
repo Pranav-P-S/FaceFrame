@@ -51,7 +51,7 @@ export default function App() {
   useEffect(() => {
     api().onBackendStatus((status) => {
       setBackendStatus(status);
-      if (status.state === 'ready' && libraryPath) refresh();
+      if (status.state === 'ready' && useStore.getState().libraryPath) refresh();
     });
 
     api().onBackendEvent((event: BackendEvent) => {
@@ -94,12 +94,19 @@ export default function App() {
         case 'index_cleared':
           refresh();
           break;
+        case 'index_restored':
+          refresh();
+          break;
+        case 'places_updated':
+          refresh();
+          break;
       }
     });
 
     void api().backendState().then((state) => {
-      if (state.state === 'ready' && libraryPath) {
-        void api().openLibrary(libraryPath);
+      const current = useStore.getState().libraryPath;
+      if (state.state === 'ready' && current) {
+        void api().openLibrary(current);
         refresh();
       }
     });
@@ -187,7 +194,17 @@ export default function App() {
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
 
-      {!libraryPath && !mocked && <Welcome onPicked={(p) => setLibraryPath(p)} />}
+      {!libraryPath && !mocked && (
+        <Welcome
+          onPicked={(p) => {
+            setLibraryPath(p);
+            // The scan Welcome kicks off creates the backend context, but
+            // open the library right away so the shell session is bound
+            // even if the scan is cancelled.
+            void api().openLibrary(p).catch(() => undefined);
+          }}
+        />
+      )}
 
       {toast && (
         <div className={`toast toast-${toast.kind}`} role="status" aria-live="polite">

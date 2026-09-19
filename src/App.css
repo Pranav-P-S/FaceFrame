@@ -1336,3 +1336,361 @@ img {
     flex: 1;
   }
 }
+
+/* ------------------------------------------------------------ command palette */
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(5, 8, 12, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+
+.palette {
+  width: min(560px, 92vw);
+  background: var(--surface, #1a2028);
+  border: 1px solid var(--border, #2e3944);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.palette-input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text, #e8edf2);
+  padding: 14px 16px;
+  font-size: 16px;
+  border-bottom: 1px solid var(--border, #2e3944);
+}
+
+.palette-list {
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.palette-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 16px;
+  background: none;
+  border: none;
+  color: var(--text, #e8edf2);
+  text-align: left;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.palette-item-active {
+  background: var(--surface-hover, #232c36);
+}
+
+.palette-section {
+  color: var(--text-faint, #7d8a95);
+  font-size: 12px;
+  flex: none;
+}
+
+.palette-empty {
+  padding: 18px 16px;
+  color: var(--text-faint, #7d8a95);
+  font-size: 14px;
+}
+
+.palette-hint {
+  padding: 8px 16px;
+  border-top: 1px solid var(--border, #2e3944);
+  color: var(--text-faint, #7d8a95);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------ prompt dialog */
+
+.ff-prompt-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(5, 8, 12, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ff-prompt {
+  width: min(420px, 92vw);
+  background: var(--surface, #1a2028);
+  border: 1px solid var(--border, #2e3944);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ff-prompt-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e8edf2);
+}
+
+.ff-prompt-input {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2e3944);
+  background: var(--background, #101418);
+  color: var(--text, #e8edf2);
+  outline: none;
+}
+
+.ff-prompt-input:focus-visible {
+  border-color: var(--accent, #4da3ff);
+}
+
+.ff-prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ------------------------------------------------------------ banner + locked gate */
+
+.notice-banner {
+  margin: 8px 16px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locked-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+}
+
+/* ------------------------------------------------------------ people extras */
+
+.unclustered-strip,
+.faces-tools {
+  margin-top: 18px;
+  padding: 12px;
+  border: 1px solid var(--border, #2e3944);
+  border-radius: 12px;
+}
+
+.unclustered-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--text-faint, #7d8a95);
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.face-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.face-cell {
+  position: relative;
+  width: 76px;
+}
+
+.face-thumb {
+  position: relative;
+  width: 76px;
+  height: 76px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-hover, #232c36);
+  cursor: pointer;
+}
+
+.face-thumb img,
+.face-thumb .thumb-loading {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.face-thumb:hover {
+  border-color: var(--accent, #4da3ff);
+}
+
+.face-cell-picked .face-thumb {
+  border-color: var(--accent, #4da3ff);
+}
+
+.face-cell .thumb-check {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--accent, #4da3ff);
+  color: #08111b;
+  border-radius: 50%;
+  width: 18px;
+  height: 18px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.face-split-toggle {
+  margin-top: 4px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-faint, #7d8a95);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.face-split-toggle:hover {
+  color: var(--text, #e8edf2);
+}
+
+.person-picker {
+  background: var(--surface, #1a2028);
+  border: 1px solid var(--border, #2e3944);
+  border-radius: 10px;
+  padding: 10px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.person-picker-modal {
+  margin: 12px 0;
+  max-width: none;
+  width: min(480px, 100%);
+}
+
+.person-picker-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.person-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.person-picker-list button {
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text, #e8edf2);
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.person-picker-list button:hover {
+  background: var(--surface-hover, #232c36);
+}
+
+.person-picker-grid {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.person-picker-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-picker-option .person-avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.hidden-people {
+  margin-top: 26px;
+}
+
+.person-card-hidden {
+  opacity: 0.65;
+}
+
+/* ------------------------------------------------------------ album arrange */
+
+.arrange-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 640px;
+}
+
+.arrange-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #2e3944);
+  border-radius: 10px;
+}
+
+.arrange-index {
+  width: 24px;
+  text-align: right;
+  color: var(--text-faint, #7d8a95);
+  font-size: 13px;
+}
+
+.arrange-thumb {
+  width: 56px;
+  height: 42px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex: none;
+  background: var(--surface-hover, #232c36);
+}
+
+.arrange-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.arrange-name {
+  color: var(--text-faint, #7d8a95);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ broken tile */
+
+.thumb-broken {
+  font-size: 20px;
+  opacity: 0.6;
+}

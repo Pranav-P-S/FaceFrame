@@ -36,9 +36,15 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return undefined;
-    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    // Track both dimensions: a height-only window resize must re-window the
+    // virtualized rows even when the width is unchanged.
+    const ro = new ResizeObserver(() => {
+      setWidth(el.clientWidth);
+      setViewportH(el.clientHeight);
+    });
     ro.observe(el);
     setWidth(el.clientWidth);
+    setViewportH(el.clientHeight);
     return () => ro.disconnect();
   }, []);
 
@@ -106,11 +112,6 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
     if (el) setScrollTop(el.scrollTop);
   };
 
-  useEffect(() => {
-    const el = containerRef.current;
-    if (el) setViewportH(el.clientHeight);
-  }, [width]);
-
 
   const [first, last] = visibleRows(rowsLayout.rows, scrollTop, viewportH);
 
@@ -138,12 +139,12 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
         const target = e.target as HTMLElement | null;
         if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
         e.preventDefault();
-        selectAll(flatPaths);
+        selectAll(flatPaths, Object.fromEntries(flatItems.map((i) => [i.path, i.content_hash])));
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flatPaths, selectAll]);
+  }, [flatPaths, flatItems, selectAll]);
 
   return (
     <div className="grid-scroll" ref={containerRef} onScroll={onScroll}>

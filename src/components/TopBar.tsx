@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../lib/store';
 import { backend } from '../lib/api';
 import { api } from '../types';
+import { promptText } from '../lib/prompt';
 import { folderName } from '../images';
 
 /** Top bar: search box, density slider, theme + app menu; flips into a
@@ -62,7 +63,12 @@ export default function TopBar() {
   };
 
   if (selection.size > 0) {
-    return <SelectionBar count={selection.size} onDone={clearSelection} />;
+    return (
+      <>
+        <SelectionBar count={selection.size} onDone={clearSelection} />
+        <ScanBar />
+      </>
+    );
   }
 
   return (
@@ -153,6 +159,7 @@ export default function TopBar() {
 function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) {
   const selection = useStore((s) => s.selection);
   const showToast = useStore((s) => s.showToast);
+  const refresh = useStore((s) => s.refresh);
   const hashes = async (): Promise<string[]> => {
     // Preferred: hashes remembered at selection time (no round trips).
     const remembered = useStore.getState().selectionHashes;
@@ -187,7 +194,8 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
         onClick={async () => {
           const hs = await hashes();
           await backend.setFavorite(hs, true);
-          withUndo('Added to favorites', () => backend.setFavorite(hs, false));
+          refresh();
+          withUndo('Added to favorites', () => backend.setFavorite(hs, false).then(refresh));
           onDone();
         }}
       >
@@ -198,7 +206,8 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
         onClick={async () => {
           const hs = await hashes();
           await backend.setArchived(hs, true);
-          withUndo('Archived', () => backend.setArchived(hs, false));
+          refresh();
+          withUndo('Archived', () => backend.setArchived(hs, false).then(refresh));
           onDone();
         }}
       >
@@ -208,12 +217,16 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
         className="btn-ghost"
         onClick={async () => {
           const hs = await hashes();
-          const albumName = window.prompt('Add to album — create new or pick an existing name:');
+          const albumName = await promptText({ title: 'Add to album — create new or pick an existing name:' });
           if (!albumName) return;
-          const created = await backend.createAlbum(albumName);
-          const albumId = Number(created.album_id);
-          await backend.albumAdd(albumId, hs);
-          showToast({ text: `Added to “${albumName}”`, kind: 'info' });
+          try {
+            const created = await backend.createAlbum(albumName);
+            const albumId = Number(created.album_id);
+            await backend.albumAdd(albumId, hs);
+            showToast({ text: `Added to “${albumName}”`, kind: 'info' });
+          } catch {
+            showToast({ text: 'Could not add to album', kind: 'error' });
+          }
           onDone();
         }}
       >
@@ -226,6 +239,7 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
           try {
             await backend.setLocked(hs, true);
             showToast({ text: 'Locked — hidden until unlocked', kind: 'info' });
+            refresh();
           } catch {
             showToast({ text: 'Set a passcode in Settings first', kind: 'error' });
           }
@@ -234,12 +248,51 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
       >
         Lock
       </button>
+      {count >= 2 && (
+        <button
+          className="btn-ghost"
+          title="Build an animated GIF from the selected photos"
+          onClick={async () => {
+            const hs = await hashes();
+            try {
+              await backend.createAnimation(hs);
+              showToast({ text: 'Animation created — find it in the feed', kind: 'info' });
+              refresh();
+            } catch (e) {
+              showToast({ text: e instanceof Error ? e.message : 'Animation failed', kind: 'error' });
+            }
+            onDone();
+          }}
+        >
+          Animate
+        </button>
+      )}
+      {count >= 1 && count <= 4 && (
+        <button
+          className="btn-ghost"
+          title="Build a collage from the selected photos (1–4)"
+          onClick={async () => {
+            const hs = await hashes();
+            try {
+              await backend.createCollage(hs);
+              showToast({ text: 'Collage created — find it in the feed', kind: 'info' });
+              refresh();
+            } catch (e) {
+              showToast({ text: e instanceof Error ? e.message : 'Collage failed', kind: 'error' });
+            }
+            onDone();
+          }}
+        >
+          Collage
+        </button>
+      )}
       <button
         className="btn-ghost btn-danger-ghost"
         onClick={async () => {
           const hs = await hashes();
           await backend.setTrashed(hs, true);
-          withUndo('Moved to trash', () => backend.setTrashed(hs, false));
+          refresh();
+          withUndo('Moved to trash', () => backend.setTrashed(hs, false).then(refresh));
           onDone();
         }}
       >

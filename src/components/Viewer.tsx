@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type Item, type ItemDetail } from '../types';
 import { backend } from '../lib/api';
+import { promptText } from '../lib/prompt';
 import { viewerImage } from '../images';
 import { useStore } from '../lib/store';
 import { exposureText, formatBytes, formatDateTime, parseExif } from '../lib/format';
@@ -13,6 +14,7 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
   const infoOpen = useStore((s) => s.infoOpen);
   const setInfoOpen = useStore((s) => s.setInfoOpen);
   const showToast = useStore((s) => s.showToast);
+  const refresh = useStore((s) => s.refresh);
   const [zoom, setZoom] = useState(1);
   const [detail, setDetail] = useState<ItemDetail | null>(null);
   const [editing, setEditing] = useState(false);
@@ -46,22 +48,26 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
     if (!detail?.media) return;
     const next = !detail.media.favorite;
     await backend.setFavorite([detail.content_hash], next);
+    refresh();
     setDetail((d) => (d?.media ? { ...d, media: { ...d.media, favorite: next ? 1 : 0 } } : d));
-  }, [detail]);
+  }, [detail, refresh]);
 
   const trash = useCallback(async () => {
     if (!detail) return;
     const hash = detail.content_hash;
     await backend.setTrashed([hash], true);
+    refresh();
     showToast({
       text: 'Moved to trash',
       kind: 'info',
       actionLabel: 'Undo',
-      action: () => backend.setTrashed([hash], false),
+      action: () => {
+        void backend.setTrashed([hash], false).then(refresh);
+      },
     });
     if (items.length <= 1) closeViewer();
     else move(index === items.length - 1 ? -1 : 1);
-  }, [detail, items.length, index, move, closeViewer, showToast]);
+  }, [detail, items.length, index, move, closeViewer, showToast, refresh]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -97,30 +103,44 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
     );
   }
 
-  const addToAlbum = () => {
-    const name = window.prompt('Add to album — name:', '');
+  const addToAlbum = async () => {
+    const name = await promptText({ title: 'Add to album — name:' });
     if (!name) return;
-    void backend
-      .getAlbums()
-      .then(async (albums) => {
-        const list = (albums.albums as { id: number; name: string }[]) || [];
-        const existing = list.find((a) => a.name === name);
-        const albumId = existing
-          ? existing.id
-          : Number(((await backend.createAlbum(name)) as { album_id: number }).album_id);
-        await backend.albumAdd(albumId, [detail?.content_hash ?? '']);
-        showToast({ text: `Added to “${name}”`, kind: 'info' });
-      })
-      .catch(() => showToast({ text: 'Could not add to album', kind: 'error' }));
+    try {
+      const albums = await backend.getAlbums();
+      const list = (albums.albums as { id: number; name: string }[]) || [];
+      const existing = list.find((a) => a.name === name);
+      const albumId = existing
+        ? existing.id
+        : Number(((await backend.createAlbum(name)) as { album_id: number }).album_id);
+      await backend.albumAdd(albumId, [detail?.content_hash ?? '']);
+      showToast({ text: `Added to “${name}”`, kind: 'info' });
+    } catch {
+      showToast({ text: 'Could not add to album', kind: 'error' });
+    }
   };
 
-  const exportItem = () => {
-    const dest = window.prompt('Export to folder:', 'C:/Export');
-    if (dest) {
-      void backend
-        .exportItems([item.path], dest)
-        .then(() => showToast({ text: `Exported to ${dest}`, kind: 'info' }))
-        .catch(() => showToast({ text: 'Export failed', kind: 'error' }));
+  const exportItem = async () => {
+    const dest = await promptText({ title: 'Export to folder:', initial: 'C:/Export' });
+    if (!dest) return;
+    try {
+      await backend.exportItems([item.path], dest);
+      showToast({ text: `Exported to ${dest}`, kind: 'info' });
+    } catch {
+      showToast({ text: 'Export failed', kind: 'error' });
+    }
+  };
+
+  const deleteCreation = async () => {
+    if (!detail?.creation_id) return;
+    if (!window.confirm('Delete this creation? The original photos stay untouched.')) return;
+    try {
+      await api().request('delete_creation', { creation_id: detail.creation_id });
+      showToast({ text: 'Creation deleted', kind: 'info' });
+      refresh();
+      closeViewer();
+    } catch {
+      showToast({ text: 'Could not delete the creation', kind: 'error' });
     }
   };
 
@@ -137,7 +157,7 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
         <div className="topbar-spacer" />
         <button className="icon-btn" onClick={() => setZoom((z) => Math.max(0.2, z / 1.3))} aria-label="Zoom out">−</button>
         <button className="icon-btn" onClick={() => setZoom((z) => Math.min(6, z * 1.3))} aria-label="Zoom in">+</button>
-        <button className="icon-btn" onClick={exportItem} aria-label="Download">⭳</button>
+        <button className="icon-btn" onClick={() => void exportItem()} aria-label="Download">⭳</button>
       </div>
 
       <div className="viewer-stage">
@@ -165,17 +185,25 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
           <span className="va-icon">ⓘ</span>
           <span>Info</span>
         </button>
-        <button className="viewer-action" onClick={addToAlbum} title="Add to album">
+        <button className="viewer-action" onClick={() => void addToAlbum()} title="Add to album">
           <span className="va-icon">⊞</span>
           <span>Add</span>
         </button>
-        <button className="viewer-action viewer-action-danger" onClick={() => void trash()} title="Move to trash (Del)">
-          <span className="va-icon">🗑</span>
-          <span>Trash</span>
-        </button>
+        {detail?.kind === 'creation' && (
+          <button className="viewer-action viewer-action-danger" onClick={() => void deleteCreation()} title="Delete this generated file (originals stay)">
+            <span className="va-icon">🗑</span>
+            <span>Delete creation</span>
+          </button>
+        )}
+        {detail?.kind !== 'creation' && (
+          <button className="viewer-action viewer-action-danger" onClick={() => void trash()} title="Move to trash (Del)">
+            <span className="va-icon">🗑</span>
+            <span>Trash</span>
+          </button>
+        )}
       </div>
 
-      {infoOpen && detail && <InfoPanel detail={detail} onRefresh={() => void refreshDetail()} />}
+      {infoOpen && detail && <InfoPanel key={detail.path} detail={detail} onRefresh={() => void refreshDetail()} />}
     </div>
   );
 }

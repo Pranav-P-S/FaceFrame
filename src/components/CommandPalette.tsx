@@ -61,7 +61,7 @@ export function buildCommands(
     section: 'Actions',
     run: () => {
       if (!libraryPath) return;
-      void api().scanDirectory(libraryPath, 'auto');
+      void api().scanDirectory(libraryPath, 'auto').catch(() => undefined);
     },
   });
   cmds.push({
@@ -71,7 +71,7 @@ export function buildCommands(
     section: 'Actions',
     run: () => {
       if (!libraryPath) return;
-      void api().clusterFaces(libraryPath);
+      void api().clusterFaces(libraryPath).catch(() => undefined);
     },
   });
   cmds.push({
@@ -140,7 +140,12 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Escape') onClose();
+            // The palette sits above the viewer/page: its Escape must not
+            // also close the layer underneath.
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              onClose();
+            }
             else if (e.key === 'ArrowDown') { e.preventDefault(); setSelected((s) => Math.min(s + 1, results.length - 1)); }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setSelected((s) => Math.max(s - 1, 0)); }
             else if (e.key === 'Enter') runAt(selected);

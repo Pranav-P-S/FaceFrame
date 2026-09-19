@@ -257,6 +257,8 @@ function installMock(): void {
             groups.get(key)!.push(item);
           }
           const sorted = [...groups.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+          // Within a group, newest first — the real SQL orders ts DESC, path.
+          for (const [, items] of sorted) items.sort((a, b) => b.ts - a.ts);
           return ok({ groups: sorted.map(([key, items]) => ({ key, items })) });
         }
         case 'search': {
@@ -276,6 +278,7 @@ function installMock(): void {
             item: item && {
               ...item,
               media: { ...item },
+              creation_id: null,
               faces: item.persons.map((pid) => ({
                 id: pid, person_id: pid, bbox: '[250,120,400,300]',
                 thumbnail_path: null, person_name: state.persons.find((p) => p.id === pid)?.name ?? null,
@@ -326,7 +329,7 @@ function installMock(): void {
         case 'get_trashed':
           return ok({ items: state.items.filter((i) => i.trashedAt) });
         case 'get_locked_items':
-          return ok({ items: [] });
+          return ok({ items: state.items.filter((i) => i.locked) });
         case 'get_albums':
           return ok({
             albums: state.albums.map((a) => ({
@@ -366,20 +369,64 @@ function installMock(): void {
         }
         case 'get_persons':
           return ok({
-            persons: state.persons
-              .filter((p) => !p.hidden)
-              .map((p) => ({ id: p.id, name: p.name, thumbnail: p.avatar, face_count: p.faceCount })),
+            persons: state.persons.map((p) => ({
+              id: p.id, name: p.name, thumbnail: p.avatar, face_count: p.faceCount,
+              hidden: p.hidden,
+            })),
           });
         case 'get_unclustered':
+          return ok({ faces: [] });
+        case 'get_person_faces':
           return ok({ faces: [] });
         case 'get_photos_by_person': {
           const pid = params.person_id as number;
           const photos = visible().filter((i) => i.persons.includes(pid));
-          return ok({ photos: photos.map((p) => ({ path: p.path, face_count: 1 })) });
+          return ok({
+            photos: photos.map((p) => ({
+              path: p.path, content_hash: p.content_hash, kind: p.kind,
+              width: p.width, height: p.height, face_count: 1,
+            })),
+          });
         }
         case 'rename_person': {
           const p = state.persons.find((x) => x.id === params.person_id);
           if (p) p.name = String(params.new_name);
+          return ok();
+        }
+        case 'merge_persons': {
+          const keep = state.persons.find((x) => x.id === params.keep_id);
+          const lose = state.persons.find((x) => x.id === params.merge_id);
+          if (keep && lose) {
+            for (const i of state.items) {
+              i.persons = i.persons.map((id) => (id === lose.id ? keep.id : id));
+            }
+            keep.faceCount += lose.faceCount;
+            state.persons = state.persons.filter((x) => x.id !== lose.id);
+          }
+          return ok();
+        }
+        case 'split_person': {
+          const faceIds = (params.face_ids as number[]) || [];
+          const src = state.persons.find((x) => x.id === params.person_id);
+          if (src && faceIds.length > 0) {
+            const newId = Math.max(...state.persons.map((p) => p.id)) + 1;
+            state.persons.push({
+              id: newId,
+              name: (params.new_name as string) || `Person ${newId}`,
+              faceCount: faceIds.length,
+              avatar: avatarDataUrl((params.new_name as string) || '?'),
+              hidden: false,
+            });
+            src.faceCount = Math.max(0, src.faceCount - faceIds.length);
+            return ok({ person_id: newId });
+          }
+          return ok({ person_id: -1 });
+        }
+        case 'assign_faces':
+          return ok();
+        case 'set_person_thumbnail': {
+          const p = state.persons.find((x) => x.id === params.person_id);
+          if (p) p.avatar = String(params.thumbnail);
           return ok();
         }
         case 'set_person_hidden': {
@@ -387,14 +434,97 @@ function installMock(): void {
           if (p) p.hidden = Boolean(params.hidden);
           return ok();
         }
+        case 'rename_album': {
+          const album = state.albums.find((a) => a.id === params.album_id);
+          if (album) album.name = String(params.name);
+          return ok();
+        }
+        case 'delete_album': {
+          state.albums = state.albums.filter((a) => a.id !== params.album_id);
+          return ok();
+        }
+        case 'set_album_cover': {
+          const album = state.albums.find((a) => a.id === params.album_id);
+          if (album) {
+            const item = state.items.find((i) => i.content_hash === params.hash);
+            album.cover = item?.path ?? null;
+          }
+          return ok();
+        }
+        case 'album_reorder': {
+          const album = state.albums.find((a) => a.id === params.album_id);
+          if (album) {
+            const hashes = (params.hashes as string[]) || [];
+            album.hashes = hashes.filter((h) => album.hashes.includes(h));
+          }
+          return ok();
+        }
+        case 'set_locked': {
+          const hashes = (params.hashes as string[]) || [];
+          for (const i of state.items) {
+            if (hashes.includes(i.content_hash)) i.locked = params.locked ? 1 : 0;
+          }
+          return ok();
+        }
+        case 'set_locked_passcode':
+          return ok({ ok: true });
+        case 'remove_locked_passcode':
+          return params.code === '1234' ? ok() : Promise.reject(new Error('Wrong passcode'));
+        case 'empty_trash': {
+          const trashed = state.items.filter((i) => i.trashedAt);
+          state.items = state.items.filter((i) => !i.trashedAt);
+          return ok({ removed: trashed.length, failed: 0 });
+        }
+        case 'delete_from_disk': {
+          const paths = (params.paths as string[]) || [];
+          const removed = state.items.filter((i) => paths.includes(i.path)).length;
+          state.items = state.items.filter((i) => !paths.includes(i.path) || !i.trashedAt);
+          return ok({ removed, failed: 0 });
+        }
+        case 'resolve_missing': {
+          const paths = (params.paths as string[]) || [];
+          state.items = state.items.filter((i) => !paths.includes(i.path));
+          return ok({ removed: paths.length });
+        }
+        case 'clear_caches':
+          return ok({ removed: 0 });
+        case 'export_items':
+          return ok({ exported: ((params.paths as string[]) || []).length, errors: [] });
+        case 'create_collage': {
+          const hashes = (params.hashes as string[]) || [];
+          const src = state.items.find((i) => i.content_hash === hashes[0]);
+          if (src) {
+            const item: MockMedia = {
+              ...src,
+              path: `C:/Photos/.faceframe/creations/collage_${Date.now()}.jpg`,
+              content_hash: `c${Date.now()}`,
+              kind: 'creation',
+              media_kind: 'photo',
+              added_at: NOW,
+              ts: NOW,
+            };
+            state.items.unshift(item);
+          }
+          return ok({ id: 1, path: 'creations/collage.jpg', content_hash: 'c1' });
+        }
+        case 'create_animation':
+          return ok({ id: 2, path: 'creations/anim.gif', content_hash: 'c2' });
+        case 'delete_creation':
+          return ok();
+        case 'backup_index':
+          return ok({ path: `${String(params.dest)}/backup.faceframe.zip`, bytes: 1_200_000 });
+        case 'check_index':
+          return ok({ report: { integrity: 'ok', orphan_media: 0, missing_thumbs: 0, fts_drift: 0, live_files: visible().length, fts_rows: visible().length } });
+        case 'restore_index':
+          return ok({ restored: true });
         case 'get_places': {
           const all = visible();
           const coverAt = (n: number) => all[n % all.length]?.path ?? null;
           return ok({
             places: [
-              { geohash: 'u33d', count: 9, items: [], cover: coverAt(2), lat: 52.52, lon: 13.40, name: 'Berlin, Germany' },
-              { geohash: 'u09t', count: 6, items: [], cover: coverAt(5), lat: 48.85, lon: 2.35, name: 'Paris, France' },
-              { geohash: 'dr5r', count: 4, items: [], cover: coverAt(9), lat: 40.71, lon: -74.0, name: 'New York, USA' },
+              { geohash: 'u33d', count: 9, items: [], cover: coverAt(2), cover_hash: visible()[2]?.content_hash ?? '', lat: 52.52, lon: 13.40, name: 'Berlin, Germany' },
+              { geohash: 'u09t', count: 6, items: [], cover: coverAt(5), cover_hash: visible()[5]?.content_hash ?? '', lat: 48.85, lon: 2.35, name: 'Paris, France' },
+              { geohash: 'dr5r', count: 4, items: [], cover: coverAt(9), cover_hash: visible()[9]?.content_hash ?? '', lat: 40.71, lon: -74.0, name: 'New York, USA' },
             ],
           });
         }
@@ -455,29 +585,9 @@ function installMock(): void {
     cancelScan: () => ok(),
     clusterFaces: () => ok({ people: 3 }),
     openLibrary: () => ok({ library: { path: 'C:/Photos', items: visible().length, missing: 0, lock_set: true, labels_enabled: true, labels_ready: true, watch_enabled: false } }),
-    getPersons: () => ok({
-      persons: state.persons
-        .filter((p) => !p.hidden)
-        .map((p) => ({ id: p.id, name: p.name, thumbnail: p.avatar, face_count: p.faceCount })),
-    }),
-    getUnclusteredFaces: () => ok({ faces: [] }),
-    getPhotosByPerson: (_path, personId) =>
-      ok({
-        photos: visible()
-          .filter((i) => i.persons.includes(personId))
-          .map((p) => ({ path: p.path, face_count: 1 })),
-      }),
-    renamePerson: async () => undefined,
-    mergePersons: async () => undefined,
     clearIndex: async () => undefined,
     backendState: () => ok({ state: 'ready' }),
     retryBackend: () => ok({ state: 'ready' }),
-    readImageDataUrl: (path, maxDim = 640) => {
-      const item = findItem(path);
-      if (!item) return Promise.resolve(null);
-      void maxDim;
-      return Promise.resolve(imageFor(item));
-    },
     onBackendEvent: () => undefined,
     onBackendStatus: () => undefined,
   };

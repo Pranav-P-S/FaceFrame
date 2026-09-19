@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../../types';
 import { backend } from '../../lib/api';
 import { useStore } from '../../lib/store';
+import { promptText } from '../../lib/prompt';
 
 /** Settings: engine, feature toggles, watch mode, library management. */
 export default function SettingsPage() {
@@ -65,12 +66,15 @@ export default function SettingsPage() {
           {libraryPath && (
             <button
               className="btn-ghost btn-danger-ghost"
-              onClick={() => {
-                if (window.confirm('Clear the index? Faces, albums and edits stored by FaceFrame are removed. Your photos are not touched.')) {
-                  void api().clearIndex(libraryPath);
+              onClick={async () => {
+                if (!window.confirm('Clear the index? Faces, albums and edits stored by FaceFrame are removed. Your photos are not touched.')) return;
+                try {
+                  await api().clearIndex(libraryPath);
                   showToast({ text: 'Index cleared', kind: 'info' });
-                  refresh();
+                } catch (e) {
+                  showToast({ text: e instanceof Error ? e.message : 'Could not clear the index', kind: 'error' });
                 }
+                refresh();
               }}
             >
               Clear index
@@ -149,6 +153,26 @@ export default function SettingsPage() {
           />
           <button className="btn btn-small" type="submit">Save</button>
         </form>
+        {lockSet && (
+          <button
+            className="btn-chip btn-danger-ghost"
+            onClick={async () => {
+              if (!libraryPath) return;
+              const code = await promptText({ title: 'Passcode to remove the locked folder:', placeholder: 'Current passcode' });
+              if (!code) return;
+              try {
+                await backend.removeLockedPasscode(code);
+                showToast({ text: 'Passcode removed — locked items are visible again', kind: 'info' });
+                setLockSet(false);
+                refresh();
+              } catch {
+                showToast({ text: 'Wrong passcode', kind: 'error' });
+              }
+            }}
+          >
+            Remove passcode…
+          </button>
+        )}
         <p className="info-muted">Hides items from FaceFrame's views — files stay unencrypted on disk.</p>
       </section>
 

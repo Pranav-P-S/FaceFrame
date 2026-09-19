@@ -84,6 +84,7 @@ export interface ItemDetail {
   added_at: number;
   missing: number;
   trashed_at: number | null;
+  creation_id: number | null;
   media: MediaInfo | null;
   faces: { id: number; bbox: string; person_id: number | null; thumbnail_path: string | null; person_name: string | null }[];
   albums: { id: number; name: string }[];
@@ -162,7 +163,9 @@ export type BackendEvent =
   | { event: 'scan_cancelled'; path: string }
   | { event: 'scan_error'; message: string }
   | { event: 'cluster_done'; people: number; new_people: number; assigned: number; unclustered: number }
-  | { event: 'index_cleared'; path: string };
+  | { event: 'index_cleared'; path: string }
+  | { event: 'places_updated'; path: string }
+  | { event: 'index_restored'; path: string };
 
 /** Declared by the Electron preload script (or the dev mock). */
 export interface FaceFrameApi {
@@ -174,18 +177,11 @@ export interface FaceFrameApi {
   scanDirectory(path: string, provider: string): Promise<unknown>;
   cancelScan(): Promise<unknown>;
   clusterFaces(path: string): Promise<{ people: number }>;
-  openLibrary(path: string): Promise<{ library: LibraryInfo }>;
-
-  getPersons(path: string): Promise<{ persons: Person[] }>;
-  getUnclusteredFaces(path: string): Promise<{ faces: Face[] }>;
-  getPhotosByPerson(path: string, personId: number): Promise<{ photos: { path: string; face_count: number }[] }>;
-  renamePerson(path: string, personId: number, newName: string): Promise<unknown>;
-  mergePersons(path: string, keepId: number, mergeId: number): Promise<unknown>;
   clearIndex(path: string): Promise<unknown>;
+  openLibrary(path: string): Promise<{ library: LibraryInfo }>;
 
   backendState(): Promise<BackendStatus & { state: string; reason?: string }>;
   retryBackend(): Promise<{ state: string }>;
-  readImageDataUrl(path: string, maxDim?: number): Promise<string | null>;
 
   onBackendEvent(callback: (event: BackendEvent) => void): void;
   onBackendStatus(callback: (status: BackendStatus) => void): void;

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { backend } from '../../lib/api';
 import { api } from '../../types';
 import { useStore } from '../../lib/store';
+import { promptText } from '../../lib/prompt';
 import { formatBytes } from '../../lib/format';
 
 /** Utilities: duplicates review, missing files, storage usage, creations. */
@@ -23,7 +24,6 @@ export default function UtilitiesPage() {
     void backend.getMissing().then((res) => setMissing((res.items as typeof missing) ?? []));
     void backend.getStorageStats().then((res) => setStats(res.stats as never));
   };
-  useEffect(reload, []);
   useEffect(reload, []);
 
   return (
@@ -70,7 +70,7 @@ export default function UtilitiesPage() {
             className="btn"
             onClick={async () => {
               if (!libraryPath) return;
-              const dest = window.prompt('Back up the index to folder:', 'C:/Backup');
+              const dest = await promptText({ title: 'Back up the index to folder:', initial: 'C:/Backup' });
               if (!dest) return;
               try {
                 const res = await api().request('backup_index', { path: libraryPath, dest });
@@ -81,6 +81,25 @@ export default function UtilitiesPage() {
             }}
           >
             Back up index…
+          </button>
+          <button
+            className="btn-chip"
+            onClick={async () => {
+              if (!libraryPath) return;
+              const src = await promptText({ title: 'Restore from backup file (.zip):', placeholder: 'C:/Backup/Library-faceframe.zip' });
+              if (!src) return;
+              if (!window.confirm('Restoring replaces the current index (people, faces, edits) with the backup. Continue?')) return;
+              try {
+                await api().request('restore_index', { path: libraryPath, src });
+                showToast({ text: 'Index restored from the backup', kind: 'info' });
+                refresh();
+                reload();
+              } catch (e) {
+                showToast({ text: `Restore failed: ${e instanceof Error ? e.message : e}`, kind: 'error' });
+              }
+            }}
+          >
+            Restore index…
           </button>
           <button
             className="btn-chip"

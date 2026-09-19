@@ -16,6 +16,7 @@ interface ThumbProps {
 
 export default function Thumb({ item, height, selected, selectMode, onOpen, onSelect }: ThumbProps) {
   const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLButtonElement>(null);
   const [near, setNear] = useState(false);
 
@@ -38,9 +39,17 @@ export default function Thumb({ item, height, selected, selectMode, onOpen, onSe
   useEffect(() => {
     if (!near) return undefined;
     let cancelled = false;
-    gridPreview(item.path).then((u) => {
-      if (!cancelled) setUrl(u);
-    });
+    setFailed(false);
+    gridPreview(item.path)
+      .then((u) => {
+        if (!cancelled) {
+          if (u) setUrl(u);
+          else setFailed(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
     return () => {
       cancelled = true;
     };
@@ -57,16 +66,22 @@ export default function Thumb({ item, height, selected, selectMode, onOpen, onSe
       onClick={(e) => (selectMode || e.shiftKey ? onSelect(e.shiftKey) : onOpen())}
       title={item.caption || item.path}
     >
-      {url ? <img src={url} alt="" loading="lazy" /> : <div className="thumb-loading" />}
+      {url ? (
+        <img src={url} alt="" loading="lazy" />
+      ) : failed ? (
+        <span className="thumb-broken" aria-label="Image could not be displayed">⚠</span>
+      ) : (
+        <div className="thumb-loading" />
+      )}
       {isVideo && (
         <>
           <span className="thumb-play" aria-hidden>▶</span>
           <span className="thumb-duration">{formatDuration(item.duration)}</span>
         </>
       )}
-      {/* Motion stills keep their embedded clip one tap away, mirroring the
-          backend's promise that the pair shows once with a play affordance. */}
-      {flagged?.motion ? <span className="thumb-play" aria-hidden>▶</span> : null}
+      {/* Motion pairs arrive as a top-level flag from the view SQL, not
+          inside media.flags. */}
+      {(item as { motion?: unknown }).motion ? <span className="thumb-play" aria-hidden>▶</span> : null}
       {flagged?.panorama ? <span className="thumb-badge">pano</span> : null}
       {selected && <span className="thumb-check" aria-hidden>✓</span>}
     </button>
