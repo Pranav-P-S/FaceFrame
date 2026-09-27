@@ -256,14 +256,16 @@ export default function Editor({
                       return;
                     }
                     const [rw, rh] = preset === '1:1' ? [1, 1] : preset === '4:3' ? [4, 3] : [16, 9];
-                    // The crop applies before rotation, so a 90°/270° photo
-                    // needs the preset's aspect measured on the rotated frame.
+                    // The crop applies before rotation, so a 90°/270° edit
+                    // turns the target aspect on its side: a rect that must
+                    // DISPLAY as rw/rh needs original-frame aspect rh/rw.
                     const rotated = ((edit.rotate ?? 0) % 180) !== 0;
-                    const srcAspect = (rotated ? height / width : width / height);
+                    const sourceAspect = width / height;
+                    const target = rotated ? rh / rw : rw / rh;
                     let cw = 1;
                     let ch = 1;
-                    if (srcAspect > rw / rh) cw = (rw / rh) / srcAspect;
-                    else ch = srcAspect / (rw / rh);
+                    if (sourceAspect > target) cw = target / sourceAspect;
+                    else ch = sourceAspect / target;
                     update({ crop: [(1 - cw) / 2, (1 - ch) / 2, cw, ch] });
                   }}
                 >

@@ -94,7 +94,16 @@ class PeopleService:
 
         noise = [face_ids[i] for i, label in enumerate(labels) if label == -1]
         if noise:
-            self.store.set_faces_person(noise, None)
+            # Faces of custom-named persons keep their assignment: a
+            # user-curated person must survive re-clustering even when every
+            # face lands in noise (single-face persons always do at
+            # MIN_SAMPLES=2, which used to silently delete them).
+            custom = self._custom_named_persons()
+            removable = [
+                fid for fid in noise if previous.get(fid) not in custom
+            ]
+            if removable:
+                self.store.set_faces_person(removable, None)
 
         self.store.delete_empty_persons()
         people_count = len(label_to_person)

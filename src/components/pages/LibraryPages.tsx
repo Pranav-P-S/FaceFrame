@@ -4,7 +4,7 @@ import { backend } from '../../lib/api';
 import { useStore } from '../../lib/store';
 import PhotoGrid from '../../components/PhotoGrid';
 
-/** Trash / Archive / Locked views: same grid, different lifecycle actions. */
+/** Trash / Archive / Hidden views: same grid, different lifecycle actions. */
 
 export function TrashPage() {
   const [items, setItems] = useState<Item[]>([]);
@@ -117,7 +117,7 @@ export function LockedPage() {
     return (
       <div className="page locked-gate">
         <div className="empty-state">
-          <h2>🔒 Locked folder</h2>
+          <h2>🔒 Hidden folder</h2>
           <p className="empty-hint">
             Enter the passcode to show items you have hidden. Files stay on disk —
             this hides them from FaceFrame's views, it does not encrypt.
@@ -145,11 +145,11 @@ export function LockedPage() {
   }
   return (
     <div className="page">
-      <h1 className="page-title">Locked items</h1>
+      <h1 className="page-title">Hidden items</h1>
       {items.length ? (
         <PhotoGrid groups={[{ key: 'locked', items }]} view="days" onOpen={() => undefined} flatten />
       ) : (
-        <div className="empty-state"><h2>Nothing locked</h2><p className="empty-hint">Select items in the feed and lock them from the selection bar.</p></div>
+        <div className="empty-state"><h2>Nothing hidden</h2><p className="empty-hint">Select items in the feed and hide them from the selection bar.</p></div>
       )}
     </div>
   );

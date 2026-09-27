@@ -1,13 +1,18 @@
 """Store: the v3 content-addressed query layer.
 
-One Store per operation is fine (connections are opened per call and closed,
-a Windows constraint inherited from v0.2). All item queries anchor on
-``files`` so an item appears at most once per view; all expensive data hangs
-off ``media`` keyed by content hash so it is computed once per content.
+Connections are pooled per (Store, thread): each thread reuses one open
+connection instead of paying open+PRAGMA+close on every call. WAL mode lets
+readers run beside the writer, and every path that replaces or removes the
+database FILE (restore_index, clear_index) must call close_all() first — on
+Windows an open handle would make the replacement silently fail. All item
+queries anchor on ``files`` so an item appears at most once per view; all
+expensive data hangs off ``media`` keyed by content hash so it is computed
+once per content.
 """
 
 import logging
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 
@@ -29,21 +34,95 @@ class Store:
     def __init__(self, db_path: str, library_root: str | None = None):
         self.db_path = db_path
         self.library_root = library_root
+        # Pooled connections live per thread; _epoch invalidates every
+        # thread's cached handle when close_all() swaps the DB file.
+        self._local = threading.local()
+        self._epoch = 0
+        self._pool_lock = threading.Lock()
+        self._pooled: list = []
         with self.connect() as conn:
             schema.ensure_schema(conn, library_root)
 
+    def _thread_conn(self) -> sqlite3.Connection:
+        self._reap_dead_threads()
+        cached = getattr(self._local, "entry", None)
+        if cached is not None and cached[0] == self._epoch:
+            return cached[1]
+        conn = sqlite3.connect(
+            self.db_path, timeout=10.0, check_same_thread=False
+        )
+        # Once per connection: journal_mode persists in the file, the other
+        # two are per-connection. Row factory is per-connection too.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.row_factory = sqlite3.Row
+        self._local.entry = (self._epoch, conn)
+        with self._pool_lock:
+            self._pooled.append((conn, threading.current_thread()))
+        return conn
+
+    def _reap_dead_threads(self):
+        """Close connections owned by threads that have finished (scan and
+        cluster jobs each run on their own thread; without this, every job
+        would leave an idle handle on the DB file forever). A dead thread's
+        connection is guaranteed idle, so closing cross-thread is safe."""
+        with self._pool_lock:
+            alive = [(c, t) for c, t in self._pooled if t.is_alive()]
+            if len(alive) == len(self._pooled):
+                return
+            dead = [c for c, t in self._pooled if not t.is_alive()]
+            self._pooled = alive
+        for conn in dead:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
     @contextmanager
     def connect(self):
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
+        # `with conn` commits (or rolls back) DML on exit; reads run in
+        # autocommit — the same per-call transaction shape as before, minus
+        # the connection churn.
+        conn = self._thread_conn()
+        with conn:
+            yield conn
+
+    def release_thread_conn(self) -> None:
+        """Close the CALLING thread's pooled connection. The command loop
+        calls this after every request so the library folder carries no open
+        handle at rest — Explorer renames/moves of the library keep working
+        while the app idles. Bursty workers (a scan pipeline run) keep one
+        connection for their whole lifetime instead: that is where the old
+        per-operation open/close actually hurt."""
+        entry = getattr(self._local, "entry", None)
+        if entry is None:
+            return
+        self._local.entry = None
+        conn = entry[1]
+        with self._pool_lock:
+            self._pooled = [(c, t) for c, t in self._pooled if c is not conn]
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.row_factory = sqlite3.Row
-            with conn:
-                yield conn
-        finally:
             conn.close()
+        except sqlite3.Error:
+            pass
+
+    def close_all(self):
+        """Close every pooled connection, from any thread. REQUIRED before
+        anything replaces or deletes the database file (restore, clear) —
+        on Windows the open handle would block the swap."""
+        with self._pool_lock:
+            conns = [c for c, _ in self._pooled]
+            self._pooled = []
+            # Bump inside the lock: a thread that read the old epoch just
+            # before the bump must not hand out (or keep using) a connection
+            # this call is about to close.
+            self._epoch += 1
+        for conn in conns:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     # -- meta ------------------------------------------------------------
 
@@ -120,6 +199,10 @@ class Store:
             conn.execute(
                 f"UPDATE media SET {', '.join(sets)} WHERE content_hash=?", vals
             )
+            if date_override is not ...:
+                # The feed sorts on files.sort_time; a corrected date must
+                # land there or the item would keep its old position.
+                _recompute_sort_time(conn, content_hash=content_hash)
 
     # -- files -----------------------------------------------------------
 
@@ -149,6 +232,7 @@ class Store:
                 (path, content_hash, kind, size, mtime,
                  time.time(), added_at if added_at is not None else time.time()),
             )
+            _recompute_sort_time(conn, path=path)
             # A live row for content H means any missing ghost of H was a
             # move, not a deletion: the old path row must not linger in the
             # missing list forever.
@@ -414,9 +498,26 @@ class Store:
     def search_text(self, query: str) -> list:
         """FTS lookup over captions, labels and filenames; returns file hits."""
         terms = [t for t in query.replace('"', " ").split() if t]
-        if not terms:
+        return self.search_groups([[t] for t in terms])
+
+    def search_groups(self, groups: list) -> list:
+        """FTS lookup over AND-joined term groups, each group a list of
+        alternatives (any-of). Group ['dog', 'Chihuahua', ...] matches a
+        document carrying any of those phrases; a document must match every
+        group. Used by views to expand category words into class names."""
+        # A quote would terminate the FTS phrase early ("unterminated
+        # string"); alternatives are search terms, never operators.
+        cleaned = [
+            [a.replace('"', " ") for a in group if a.replace('"', " ").strip()]
+            for group in groups
+        ]
+        match = " AND ".join(
+            "(" + " OR ".join(f'"{alt}"' for alt in group) + ")"
+            for group in cleaned
+            if group
+        )
+        if not match:
             return []
-        match = " AND ".join(f'"{t}"' for t in terms)
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT m.path, m.content_hash
@@ -580,7 +681,9 @@ class Store:
             return cur.rowcount
 
     def person_photos(self, person_id: int) -> list:
-        """Distinct visible images containing this person, newest first."""
+        """Distinct visible images containing this person, newest first.
+        The hidden-folder gate matches the feed: locked content does not
+        surface on person pages without the passcode."""
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT f.path, f.content_hash, COUNT(fa.id) AS face_count,
@@ -591,6 +694,7 @@ class Store:
                    JOIN media m ON m.content_hash = fa.content_hash
                    WHERE fa.person_id = ?
                      AND f.missing=0 AND f.trashed_at IS NULL
+                     AND COALESCE(m.locked,0)=0
                    GROUP BY f.path
                    ORDER BY ts DESC""",
                 (person_id,),
@@ -603,6 +707,8 @@ class Store:
                 """SELECT fa.id, fa.content_hash, fa.bbox, fa.thumbnail_path
                    FROM faces fa
                    WHERE fa.person_id=?
+                     AND COALESCE((SELECT m.locked FROM media m
+                                   WHERE m.content_hash=fa.content_hash),0)=0
                    ORDER BY fa.id""",
                 (person_id,),
             ).fetchall()
@@ -616,6 +722,8 @@ class Store:
                    FROM faces fa
                    LEFT JOIN files f ON f.content_hash = fa.content_hash
                    WHERE fa.person_id IS NULL
+                     AND COALESCE((SELECT m.locked FROM media m
+                                   WHERE m.content_hash=fa.content_hash),0)=0
                    GROUP BY fa.id
                    ORDER BY fa.id
                    LIMIT ?""",
@@ -658,6 +766,30 @@ def _dumps(value) -> str:
     import json
 
     return value if isinstance(value, str) else json.dumps(value)
+
+
+_SORT_TIME_SQL = """UPDATE files SET sort_time=COALESCE(
+       (SELECT m.date_override FROM media m WHERE m.content_hash=files.content_hash),
+       (SELECT m.capture_time FROM media m WHERE m.content_hash=files.content_hash),
+       mtime){where}"""
+
+
+def _recompute_sort_time(conn: sqlite3.Connection, path: str | None = None,
+                         content_hash: str | None = None):
+    """Refresh the materialized feed sort key. Must run whenever a file row's
+    content_hash/mtime changes (upsert_file) or its content's date_override /
+    capture_time changes (set_media_user_state, migration backfill) — the
+    feed/search ORDER BY reads this column through idx_files_sort instead of
+    re-deriving the COALESCE over the whole library. With no scope arguments
+    it recomputes every row (tests, manual repair)."""
+    if path is not None:
+        conn.execute(_SORT_TIME_SQL.format(where=" WHERE path=?"), (path,))
+    elif content_hash is not None:
+        conn.execute(
+            _SORT_TIME_SQL.format(where=" WHERE content_hash=?"), (content_hash,)
+        )
+    else:
+        conn.execute(_SORT_TIME_SQL.format(where=""))
 
 
 def _fts_text(path: str, caption: str | None, labels: str | None) -> str:

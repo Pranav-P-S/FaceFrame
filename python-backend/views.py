@@ -11,6 +11,7 @@ import datetime
 import json
 import time
 
+import labels
 import query as query_mod
 
 
@@ -56,7 +57,7 @@ def _base_items(
     sql = """
         SELECT f.path, f.content_hash, f.kind, f.added_at,
                f.paired_path AS motion,
-               COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
+               COALESCE(f.sort_time, m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
                m.favorite, m.archived, m.locked, m.caption, m.flags,
                m.labels
@@ -77,7 +78,9 @@ def _base_items(
     # (with the paired video reachable for playback).
     sql += " AND NOT (m.kind='video' AND f.paired_path IS NOT NULL)"
     sql += extra_where
-    sql += " ORDER BY ts DESC, f.path LIMIT ?"
+    # sort_time is materialized + indexed (idx_files_sort): the planner walks
+    # it in order instead of temp-B-tree sorting the library on every load.
+    sql += " ORDER BY f.sort_time DESC, f.path LIMIT ?"
     params.append(int(limit))
     with store.connect() as conn:
         rows = conn.execute(sql, (*params, *extra_params)).fetchall()
@@ -136,9 +139,13 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
 
     text_hashes = None
     if parsed.text:
+        # Category words expand to the labeler's class names ("dog" also
+        # matches "golden retriever"); unavailable classes leave terms as-is.
         text_hashes = {
-            hit["content_hash"] for hit in store.search_text(" ".join(parsed.text))
-        }
+            hit["content_hash"]
+            for hit in store.search_groups(
+                labels.expand_search_terms(parsed.text)
+            )        }
         if not text_hashes:
             return {"items": [], "total": 0, "filters": parsed.filters}
 
@@ -146,7 +153,7 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
     base_sql = """
         SELECT f.path, f.content_hash, f.kind,
                f.paired_path AS motion,
-               COALESCE(m.date_override, m.capture_time, f.mtime) AS ts,
+               COALESCE(f.sort_time, m.date_override, m.capture_time, f.mtime) AS ts,
                m.kind AS media_kind, m.width, m.height, m.duration,
                m.favorite, m.archived, m.locked, m.caption, m.flags,
                m.labels
@@ -198,12 +205,14 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
     place_values = parsed.get("place")
     if place_values:
         # Resolve geoname strings to geohash cells, then match the geohash
-        # the scan stored in media.flags.
+        # the scan stored in media.flags. The LIKE must mirror json.dumps's
+        # `": "` separator exactly — a compact `"geohash":"x"` pattern
+        # matches nothing.
         cells = store.geohashes_for_names(place_values)
         if cells:
             clause = " OR ".join("m.flags LIKE ?" for _ in cells)
             where.append(f"({clause})")
-            params.extend([f'%"geohash":"{cell}"%' for cell in cells])
+            params.extend([f'%"geohash": "{cell}"%' for cell in cells])
         else:
             where.append("0=1")
 
@@ -251,7 +260,7 @@ def search_items(store, raw_query: str, include_locked: bool = False) -> dict:
         else:
             sql += f" AND f.content_hash IN ({','.join('?' * len(text_hashes))})"
             params.extend(text_hashes)
-    sql += " ORDER BY ts DESC, f.path LIMIT 5000"
+    sql += " ORDER BY f.sort_time DESC, f.path LIMIT 5000"
 
     with store.connect() as conn:
         rows = conn.execute(sql, params).fetchall()

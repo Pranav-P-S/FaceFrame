@@ -8,12 +8,28 @@ const GRID = 384;
 const VIEWER = 2200;
 
 let cacheVersion = 0;
+const versionListeners = new Set<() => void>();
 
 /** Editors call this after saving/reverting so cached previews of the edited
- * item are refetched instead of showing stale pixels. */
+ * item are refetched instead of showing stale pixels. Bumping clears the
+ * caches AND notifies subscribers — mounted consumers key their fetch
+ * effects on the version, so already-visible tiles pick up the new pixels
+ * too, not just future mounts. */
 export function bumpImageCache(): void {
   cacheVersion += 1;
   caches.clear();
+  for (const listener of versionListeners) listener();
+}
+
+export function getImageCacheVersion(): number {
+  return cacheVersion;
+}
+
+export function subscribeImageCacheVersion(listener: () => void): () => void {
+  versionListeners.add(listener);
+  return () => {
+    versionListeners.delete(listener);
+  };
 }
 
 const caches = new Map<number, Map<string, string>>();

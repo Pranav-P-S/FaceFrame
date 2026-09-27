@@ -64,11 +64,23 @@ CREATE TABLE IF NOT EXISTS files (
     last_seen REAL,
     added_at REAL NOT NULL DEFAULT 0,
     trashed_at REAL,
-    paired_path TEXT                          -- motion-photo pairing (per path)
+    paired_path TEXT,                         -- motion-photo pairing (per path)
+    sort_time REAL                            -- COALESCE(date_override, capture_time, mtime)
 );
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 CREATE INDEX IF NOT EXISTS idx_files_capture ON files(added_at);
-CREATE INDEX IF NOT EXISTS idx_files_trashed ON files(trashed_at);
+-- Partial on purpose: only trashed rows are IN the index. The feed asks
+-- trashed_at IS NULL (no index can help, so the ordered idx_files_sort
+-- below wins the plan) while the trash page asks IS NOT NULL (tiny index,
+-- perfect fit). The old full index used to seduce the planner into
+-- trashed-IS-NULL plans + a temp B-tree sort on every feed load.
+CREATE INDEX IF NOT EXISTS idx_files_trashed ON files(trashed_at)
+    WHERE trashed_at IS NOT NULL;
+-- The feed/search ORDER BY (sort_time DESC, path) is satisfied by this
+-- partial index (live rows only, exactly the view filters) instead of a
+-- temp B-tree over the whole library on every load.
+CREATE INDEX IF NOT EXISTS idx_files_sort ON files(sort_time DESC, path)
+    WHERE missing=0 AND trashed_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS persons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +120,9 @@ CREATE TABLE IF NOT EXISTS album_items (
     added_at REAL NOT NULL,
     UNIQUE(album_id, content_hash)
 );
+-- item_detail joins and media-row cascades look album_items up by content
+-- hash, and without this index those lookups are full scans.
+CREATE INDEX IF NOT EXISTS idx_album_items_hash ON album_items(content_hash);
 
 CREATE TABLE IF NOT EXISTS geonames (
     geohash TEXT PRIMARY KEY,
@@ -172,11 +187,52 @@ def ensure_schema(conn: sqlite3.Connection, library_root: str | None = None):
 
 
 def _add_missing_columns(conn: sqlite3.Connection):
-    """Idempotent column additions for indexes created by earlier builds of
-    the same major version. SQLite has no ADD COLUMN IF NOT EXISTS."""
+    """Idempotent additions for columns/indexes introduced by later builds of
+    the same major version. SQLite has no ADD COLUMN IF NOT EXISTS, and the
+    whole point is that a v3 database from an earlier FaceFrame build upgrades
+    in place without a dump/restore."""
     existing = {r[1] for r in conn.execute("PRAGMA table_info(files)")}
     if "paired_path" not in existing:
         conn.execute("ALTER TABLE files ADD COLUMN paired_path TEXT")
+    if "sort_time" not in existing:
+        conn.execute("ALTER TABLE files ADD COLUMN sort_time REAL")
+        # Rows written by earlier builds need the key materialized once;
+        # steady-state writers (upsert_file, set_media_user_state) keep it
+        # current, so this backfill must NOT run on every open.
+        _backfill_sort_time(conn)
+    # CREATE INDEX IF NOT EXISTS is a metadata no-op when present; running it
+    # on every open picks up indexes added by later same-version builds. The
+    # old full trashed index is swapped for the partial one EXACTLY once —
+    # keyed on the stored definition, because an unconditional DROP would
+    # force a real index rebuild on every Store open.
+    stored = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_files_trashed'"
+    ).fetchone()
+    if stored is not None and "WHERE" not in (stored[0] or "").upper():
+        conn.execute("DROP INDEX idx_files_trashed")
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_files_trashed
+           ON files(trashed_at) WHERE trashed_at IS NOT NULL"""
+    )
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_files_sort
+           ON files(sort_time DESC, path) WHERE missing=0 AND trashed_at IS NULL"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_album_items_hash ON album_items(content_hash)"
+    )
+
+
+def _backfill_sort_time(conn: sqlite3.Connection):
+    """Recompute files.sort_time from its sources. Idempotent; called when
+    the column is first added and at the end of the v1/v2 migration (which
+    inserts file rows directly)."""
+    conn.execute(
+        """UPDATE files SET sort_time=COALESCE(
+               (SELECT m.date_override FROM media m WHERE m.content_hash=files.content_hash),
+               (SELECT m.capture_time FROM media m WHERE m.content_hash=files.content_hash),
+               mtime)"""
+    )
 
 
 def _run_ddl(conn: sqlite3.Connection):
@@ -289,6 +345,16 @@ def _migrate_v1_v2_to_v3(conn: sqlite3.Connection, library_root: str | None):
     conn.execute("DROP TABLE _v2_faces")
     conn.execute("DROP TABLE _v2_files")
     conn.execute("DROP TABLE _v2_persons")
+    # The migration inserted file rows directly; give them their feed sort
+    # key and the indexes the fresh DDL would have created.
+    _backfill_sort_time(conn)
+    conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_files_sort
+           ON files(sort_time DESC, path) WHERE missing=0 AND trashed_at IS NULL"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_album_items_hash ON album_items(content_hash)"
+    )
     logger.info(
         "Migration done: %d media, %d files, %d faces",
         len(media_seen),

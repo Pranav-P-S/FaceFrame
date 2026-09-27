@@ -7,8 +7,15 @@ import { useStore } from '../lib/store';
 import { exposureText, formatBytes, formatDateTime, parseExif } from '../lib/format';
 import Editor from './Editor';
 
-/** Fullscreen viewer: zoom, navigation, actions, info panel, editor. */
-export default function Viewer({ items, index }: { items: Item[]; index: number }) {
+/** Fullscreen viewer: zoom, navigation, actions, info panel, editor.
+
+ * Mounted permanently at the app root and self-subscribing: swiping between
+ * photos updates only this component, not the whole App tree with the feed
+ * grid behind it. */
+export default function Viewer() {
+  const viewer = useStore((s) => s.viewer);
+  const items = viewer?.items;
+  const index = viewer?.index ?? 0;
   const setViewerIndex = useStore((s) => s.setViewerIndex);
   const closeViewer = useStore((s) => s.closeViewer);
   const infoOpen = useStore((s) => s.infoOpen);
@@ -19,7 +26,7 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
   const [detail, setDetail] = useState<ItemDetail | null>(null);
   const [editing, setEditing] = useState(false);
 
-  const item = items[index];
+  const item = items?.[index];
 
   const refreshDetail = useCallback(async () => {
     if (!item) return;
@@ -53,7 +60,7 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
   }, [detail, refresh]);
 
   const trash = useCallback(async () => {
-    if (!detail) return;
+    if (!detail || !items) return;
     const hash = detail.content_hash;
     await backend.setTrashed([hash], true);
     refresh();
@@ -67,13 +74,22 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
     });
     if (items.length <= 1) closeViewer();
     else move(index === items.length - 1 ? -1 : 1);
-  }, [detail, items.length, index, move, closeViewer, showToast, refresh]);
+  }, [detail, items, index, move, closeViewer, showToast, refresh]);
 
   useEffect(() => {
+    // The viewer is mounted permanently (it self-subscribes), so the global
+    // shortcuts must only live while a photo is actually open — otherwise
+    // ArrowLeft/Delete/f would hijack the feed.
+    if (!viewer) return undefined;
     const onKey = (e: KeyboardEvent) => {
       if (editing) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      // Arrows may repeat (held-key navigation); destructive and toggle keys
+      // must not — OS key-repeat would trash a run of photos with a single
+      // press, and modifier chords (Ctrl+F…) are not viewer shortcuts.
+      const isArrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+      if (!isArrow && (e.repeat || e.ctrlKey || e.metaKey || e.altKey)) return;
       if (e.key === 'ArrowRight') move(1);
       else if (e.key === 'ArrowLeft') move(-1);
       else if (e.key === 'Escape') closeViewer();
@@ -83,7 +99,11 @@ export default function Viewer({ items, index }: { items: Item[]; index: number 
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editing, infoOpen, move, closeViewer, setInfoOpen, toggleFavorite, trash]);
+  }, [viewer, editing, infoOpen, move, closeViewer, setInfoOpen, toggleFavorite, trash]);
+
+  // Every hook above runs on every render; only the JSX below is gated on
+  // the viewer actually being open.
+  if (!viewer || !items || !item) return null;
 
   const isVideo = item.kind === 'video' || item.media_kind === 'video';
 

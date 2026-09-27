@@ -50,7 +50,7 @@ export function buildCommands(
     go('places', 'Places', 'map locations gps'),
     go('archive', 'Archive', 'hidden'),
     go('trash', 'Trash', 'deleted recycle bin'),
-    go('locked', 'Locked folder', 'private hidden passcode'),
+    go('locked', 'Hidden folder', 'private hidden passcode'),
     go('utilities', 'Utilities', 'duplicates missing storage health backup'),
     go('settings', 'Settings', 'preferences engine watch'),
   ];

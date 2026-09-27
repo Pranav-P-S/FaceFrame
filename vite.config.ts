@@ -27,4 +27,17 @@ export default defineConfig({
     strictPort: true,
   },
   clearScreen: false,
+  build: {
+    rollupOptions: {
+      output: {
+        // Third-party code (React, Zustand, …) changes far less often than
+        // the app bundle; splitting keeps the app chunk small so V8 parses
+        // less on startup.
+        manualChunks(id) {
+          if (id.includes("node_modules")) return "vendor";
+          return undefined;
+        },
+      },
+    },
+  },
 });

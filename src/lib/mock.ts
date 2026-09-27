@@ -93,7 +93,7 @@ declare global {
 interface MockState {
   items: MockMedia[];
   persons: { id: number; name: string; faceCount: number; avatar: string; hidden: boolean }[];
-  albums: { id: number; name: string; cover: string | null; hashes: string[] }[];
+  albums: { id: number; name: string; cover: string | null; hashes: string[]; sort?: string }[];
   captions: Map<string, string>;
 }
 
@@ -448,6 +448,13 @@ function installMock(): void {
           if (album) {
             const item = state.items.find((i) => i.content_hash === params.hash);
             album.cover = item?.path ?? null;
+          }
+          return ok();
+        }
+        case 'set_album_sort': {
+          const album = state.albums.find((a) => a.id === params.album_id);
+          if (album) {
+            album.sort = String(params.sort || 'added');
           }
           return ok();
         }

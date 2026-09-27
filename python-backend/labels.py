@@ -30,6 +30,22 @@ _KNOWN_DIGESTS = {}  # url -> sha256 hex, filled after a verified first fetch
 # A label is kept when it carries at least this softmax share; the single top
 # label is always kept so every photo is findable by "what does this show".
 LABEL_THRESHOLD = 0.10
+# ImageNet-1k's class order is fixed: 151-268 are the 118 domestic dog
+# breeds and 281-285 the domestic cats. Stored labels hold the class names
+# ("golden retriever"), so free-text "dog" would miss them without the
+# query expansion in expand_search_terms.
+IMAGENET_DOG_INDICES = frozenset(range(151, 269))
+IMAGENET_CAT_INDICES = frozenset({281, 282, 283, 284, 285})
+QUERY_CATEGORIES = {
+    "dog": IMAGENET_DOG_INDICES,
+    "dogs": IMAGENET_DOG_INDICES,
+    "puppy": IMAGENET_DOG_INDICES,
+    "puppies": IMAGENET_DOG_INDICES,
+    "cat": IMAGENET_CAT_INDICES,
+    "cats": IMAGENET_CAT_INDICES,
+    "kitten": IMAGENET_CAT_INDICES,
+    "kittens": IMAGENET_CAT_INDICES,
+}
 INPUT_SIZE = 224
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -132,6 +148,51 @@ def model_ready(cache_dir: str | None = None) -> bool:
         (cache / "mobilenetv2-12.onnx").is_file()
         and (cache / "imagenet_classes.txt").is_file()
     )
+
+
+_class_names_cache = False  # False = not loaded yet, None = absent
+
+
+def load_class_names(cache_dir: str | None = None) -> list | None:
+    """The pinned imagenet_classes.txt from the label-model cache, or None.
+    Read-only on purpose: query expansion never downloads anything."""
+    global _class_names_cache
+    if _class_names_cache is False:
+        cache = Path(
+            cache_dir
+            or os.environ.get("FACEFRAME_MODELS", str(Path.home() / ".cache" / "faceframe"))
+        )
+        path = cache / "imagenet_classes.txt"
+        _class_names_cache = (
+            [
+                line.strip()
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if path.is_file()
+            else None
+        )
+    return _class_names_cache
+
+
+def expand_search_terms(tokens: list, class_names: list | None = None) -> list:
+    """Per-token alternatives for the FTS match: a category word ("dog",
+    "kitten") becomes itself plus every ImageNet class name of that
+    category, so searching "dog" finds photos labeled "golden retriever".
+    Expansion needs the already-downloaded classes file and otherwise
+    leaves the token untouched — search never blocks on the network."""
+    if class_names is None:
+        class_names = load_class_names()
+    groups = []
+    for token in tokens:
+        indices = QUERY_CATEGORIES.get(token.lower())
+        names = (
+            {class_names[i] for i in indices if i < len(class_names)}
+            if indices and class_names
+            else set()
+        )
+        groups.append([token, *sorted(names)] if names else [token])
+    return groups
 
 
 def _ensure_model(model_path: Path, classes_path: Path, timeout: int = 90):

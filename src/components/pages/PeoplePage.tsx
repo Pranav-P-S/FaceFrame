@@ -33,7 +33,9 @@ export default function PeoplePage() {
   }, [refresh, refreshToken]);
 
   if (route.page === 'people' && route.personId != null) {
-    return <PersonDetail personId={route.personId} />;
+    // Keyed remount: split picks / photos state must never leak from one
+    // person's page into another's via back/forward navigation.
+    return <PersonDetail key={route.personId} personId={route.personId} />;
   }
 
   const findPeople = async () => {
@@ -197,6 +199,7 @@ function PersonDetail({ personId }: { personId: number }) {
   const showToast = useStore((s) => s.showToast);
   const refresh = useStore((s) => s.refresh);
   const [person, setPerson] = useState<Person | null>(null);
+  const [missing, setMissing] = useState(false);
   const [photos, setPhotos] = useState<Item[]>([]);
   const [faces, setFaces] = useState<PersonFace[]>([]);
   const [splitPicks, setSplitPicks] = useState<Set<number>>(new Set());
@@ -206,14 +209,24 @@ function PersonDetail({ personId }: { personId: number }) {
     if (!libraryPath) return;
     void backend
       .getPersons(libraryPath)
-      .then((res) => setPerson((res.persons as Person[]).find((p) => p.id === personId) ?? null));
+      .then((res) => {
+        const found = (res.persons as Person[]).find((p) => p.id === personId) ?? null;
+        setPerson(found);
+        // A stale id (back-after-merge, hidden person) must resolve to a
+        // not-found state, not a spinner forever.
+        if (!found) setMissing(true);
+      })
+      .catch(() => setMissing(true));
     void backend.getPhotosByPerson(libraryPath, personId).then((res) => {
-      const rows = (res.photos as { path: string; content_hash: string; kind?: string }[]) ?? [];
+      const rows =
+        (res.photos as { path: string; content_hash: string; kind?: string; width?: number; height?: number }[]) ?? [];
       setPhotos(
         rows.map((p) => ({
           path: p.path,
           content_hash: p.content_hash,
           kind: p.kind ?? 'photo',
+          width: p.width,
+          height: p.height,
           ts: 0,
         })) as Item[]
       );
@@ -225,6 +238,16 @@ function PersonDetail({ personId }: { personId: number }) {
     reload();
   }, [reload, refreshToken]);
 
+  if (!Number.isFinite(personId) || missing) {
+    return (
+      <div className="page">
+        <div className="empty-state">
+          <h2>Person not found</h2>
+          <p className="empty-hint"><a href="#/people">← Back to people</a></p>
+        </div>
+      </div>
+    );
+  }
   if (!person) return <div className="page"><span className="spinner" /></div>;
 
   const mergeInto = async (other: Person) => {

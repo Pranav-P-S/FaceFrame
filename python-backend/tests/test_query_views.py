@@ -204,3 +204,76 @@ def test_search_by_label_filter(dated_lib):
     # Free text still finds labels too.
     result = search_items(store, "retriever")
     assert len(result["items"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# category query expansion ("dog" finds "golden retriever")
+# ---------------------------------------------------------------------------
+
+def _fake_class_names():
+    """A minimal stand-in for imagenet_classes.txt: distinct breed names on
+    the fixed dog indices 151-268, five cat names on 281-285, filler elsewhere."""
+    classes = ["unrelated"] * 300
+    for i in range(151, 269):
+        classes[i] = f"breed {i}"
+    classes[151] = "golden retriever"
+    classes[152] = "toy poodle"
+    for i, name in enumerate(
+        ("Persian cat", "Siamese cat", "tabby", "tiger cat", "Egyptian cat")
+    ):
+        classes[281 + i] = name
+    return classes
+
+
+def test_expand_search_terms_maps_category_words():
+    from labels import expand_search_terms
+
+    classes = _fake_class_names()
+    dogs = expand_search_terms(["dog"], class_names=classes)[0]
+    assert dogs[0] == "dog"
+    assert {"golden retriever", "toy poodle"} <= set(dogs)
+    assert "Egyptian cat" not in dogs
+    # Plurals and diminutives hit the same category.
+    puppies = expand_search_terms(["puppies"], class_names=classes)[0]
+    assert {"golden retriever", "toy poodle"} <= set(puppies)
+    # Case-insensitive, and cats never leak into the dog group.
+    cats = expand_search_terms(["Cat"], class_names=classes)[0]
+    assert cats[0] == "Cat"
+    assert {"Egyptian cat", "Persian cat"} <= set(cats)
+    assert "golden retriever" not in cats
+    # Unknown words pass through untouched; an explicitly empty class list
+    # means no expansion (the default None reads the on-disk classes file).
+    assert expand_search_terms(["beach"], class_names=classes) == [["beach"]]
+    assert expand_search_terms(["dog"], class_names=[]) == [["dog"]]
+
+
+def test_search_expands_dog_to_breed_labels(dated_lib, monkeypatch):
+    root, store, lib, hashes = dated_lib
+    import labels as labels_mod
+    from views import search_items
+
+    monkeypatch.setattr(
+        labels_mod, "load_class_names", lambda: _fake_class_names()
+    )
+
+    def hash_of(path):
+        with store.connect() as conn:
+            return conn.execute(
+                "SELECT content_hash FROM files WHERE path=?", (path,)
+            ).fetchone()[0]
+
+    store.upsert_media(
+        {"content_hash": hash_of("p0.jpg"), "labels": '["golden retriever"]'}
+    )
+    store.upsert_media(
+        {"content_hash": hash_of("p2.jpg"), "labels": '["Egyptian cat"]'}
+    )
+    store.sync_fts()
+
+    # The category word reaches breed-labeled photos; the other species stays out.
+    dogs = search_items(store, "dog")
+    assert {i["path"] for i in dogs["items"]} == {"p0.jpg"}
+    cats = search_items(store, "cats")
+    assert {i["path"] for i in cats["items"]} == {"p2.jpg"}
+    # The breed name itself still works as a plain token.
+    assert {i["path"] for i in search_items(store, "retriever")["items"]} == {"p0.jpg"}

@@ -235,12 +235,16 @@ def main():
               any(i["content_hash"] == content_hash for g in feed_unlocked for i in g["items"]))
 
         print("== trash + restore ==")
-        victim2 = next(LIBRARY.glob("*.jpg"))
+        # Pick a victim whose CONTENT differs from the sample's — the
+        # glob-first file may be the duplicate copy of sample, and the ghost
+        # step below must not consume sample's media row.
         feed2 = b.request("get_feed", path=lib, view="days")["data"]["groups"]
-        h2 = next(
-            i["content_hash"]
-            for g in feed2 for i in g["items"] if i["path"].endswith(victim2.name)
+        victim2, h2 = next(
+            (i["path"], i["content_hash"])
+            for g in feed2 for i in g["items"]
+            if i["content_hash"] != content_hash
         )
+        victim2 = Path(victim2)
         b.request("set_trashed", path=lib, hashes=[h2], trashed=True)
         trashed = b.request("get_trashed", path=lib)["data"]["items"]
         check("trashed item listed", any(i["content_hash"] == h2 for i in trashed))
@@ -248,6 +252,54 @@ def main():
         feed_final = b.request("get_feed", path=lib, view="days")["data"]["groups"]
         check("restored item back in feed",
               any(i["content_hash"] == h2 for g in feed_final for i in g["items"]))
+
+        print("== ghost trash (file deleted outside the app) ==")
+        victim2.unlink()  # the user deletes the physical file via Explorer
+        b.request("set_trashed", path=lib, hashes=[h2], trashed=True)
+        ghost = b.request("empty_trash", path=lib)["data"]
+        trashed_after = b.request("get_trashed", path=lib)["data"]["items"]
+        check("ghost file cleared from trash",
+              ghost.get("failed") == 0 and ghost.get("removed", 0) >= 1
+              and all(i["content_hash"] != h2 for i in trashed_after),
+              str(ghost))
+
+        print("== album cover fallback ==")
+        feed_gc = b.request("get_feed", path=lib, view="days")["data"]["groups"]
+        other = next(
+            i["content_hash"] for g in feed_gc for i in g["items"]
+            if i["content_hash"] not in (content_hash, h2)
+        )
+        cover_album = b.request("create_album", path=lib, name="Covers")["data"]["album_id"]
+        b.request("album_add", path=lib, album_id=cover_album, hashes=[content_hash, other])
+        b.request("set_album_cover", path=lib, album_id=cover_album, hash=content_hash)
+        mine = next(
+            a for a in b.request("get_albums", path=lib)["data"]["albums"]
+            if a["id"] == cover_album
+        )
+        check("album cover resolves", bool(mine["cover"]), str(mine.get("cover")))
+        # Every live file of the cover content disappears (trashed): the
+        # cover must fall back to the album's next live item, not go gray.
+        b.request("set_trashed", path=lib, hashes=[content_hash], trashed=True)
+        mine = next(
+            a for a in b.request("get_albums", path=lib)["data"]["albums"]
+            if a["id"] == cover_album
+        )
+        fallback_hash = b.request("get_item", path=mine["cover"])["data"]["item"]["content_hash"]
+        check("dead album cover falls back to a live item",
+              bool(mine["cover"]) and fallback_hash == other,
+              f"cover={mine.get('cover')} hash={fallback_hash}")
+        b.request("set_trashed", path=lib, hashes=[content_hash], trashed=False)
+        restored_cover = next(
+            a for a in b.request("get_albums", path=lib)["data"]["albums"]
+            if a["id"] == cover_album
+        )
+        back_hash = b.request(
+            "get_item", path=restored_cover["cover"]
+        )["data"]["item"]["content_hash"]
+        check("original album cover returns after restore",
+              bool(restored_cover["cover"]) and back_hash == content_hash)
+        b.request("album_remove", path=lib, album_id=cover_album, hashes=[content_hash, other])
+        b.request("delete_album", path=lib, album_id=cover_album)
 
         print("== storage + places/memories ==")
         stats2 = b.request("get_storage_stats", path=lib)["data"]["stats"]

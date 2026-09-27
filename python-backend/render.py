@@ -131,52 +131,63 @@ def export_baked(
     edit: dict | None = None, original: bool = False,
 ):
     """Write the item's current pixels (or its untouched original) into
-    dest_dir under its own filename."""
+    dest_dir under its own filename, never overwriting unrelated files."""
+    import hashlib
+    import shutil
+
     import cv2
 
     state = store.get_file_state(rel_path)
     if not state or not state["content_hash"]:
         raise FileNotFoundError(rel_path)
-    source_name = Path(rel_path).name
-    dest = Path(dest_dir) / source_name
+    dest = Path(dest_dir) / Path(rel_path).name
     if original or not edit or not _edit_digest(edit):
-        import shutil
-
-        shutil.copyfile(str(Path(library_root) / rel_path), str(dest))
-        return str(dest)
-    img = _load_image(store, library_root, rel_path, state["content_hash"])
-    if img is None:
-        raise ValueError("Undecodable source")
-    img = _apply_edit(img, edit)
-    # Encode in the SOURCE's format: edited PNG/TIFF must not be written as
-    # JPEG bytes under a .png name.
-    suffix = dest.suffix.lower()
-    if suffix in (".png", ".tif", ".tiff", ".webp", ".bmp"):
-        ok, buf = cv2.imencode(suffix, img)
+        source = Path(library_root) / rel_path
+        new_digest = _sha256_file(source)
+        writer = lambda p: shutil.copyfile(str(source), str(p))
     else:
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    if not ok:
-        raise ValueError("Encode failed")
-    # Never silently overwrite a previous export of a different item.
-    stem, ext = dest.stem, dest.suffix
+        img = _load_image(store, library_root, rel_path, state["content_hash"])
+        if img is None:
+            raise ValueError("Undecodable source")
+        img = _apply_edit(img, edit)
+        # Encode in the SOURCE's format: edited PNG/TIFF must not be written as
+        # JPEG bytes under a .png name.
+        suffix = dest.suffix.lower()
+        if suffix in (".png", ".tif", ".tiff", ".webp", ".bmp"):
+            ok, buf = cv2.imencode(suffix, img)
+        else:
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        if not ok:
+            raise ValueError("Encode failed")
+        new_digest = hashlib.sha256(buf.tobytes()).hexdigest()
+        writer = lambda p: buf.tofile(str(p))
+    # An existing file is overwritten only when byte-identical to the new
+    # content (an honest re-export); anything else — including any unrelated
+    # image that happens to share the camera's naming — bumps to
+    # "name (1).ext" instead of being destroyed. Two magic bytes cannot
+    # establish provenance.
     counter = 1
-    while dest.exists() and _differs(dest):
-        dest = dest.with_name(f"{stem} ({counter}){ext}")
+    candidate = dest
+    while candidate.exists():
+        try:
+            if _sha256_file(candidate) == new_digest:
+                return str(candidate)
+        except OSError:
+            pass
+        candidate = dest.with_name(f"{dest.stem} ({counter}){dest.suffix}")
         counter += 1
-    buf.tofile(str(dest))
-    return str(dest)
+    writer(candidate)
+    return str(candidate)
 
 
-def _differs(path: Path) -> bool:
-    """True when an existing export file is not a previous export of this
-    same item (name-collision with an unrelated file)."""
-    try:
-        jpeg, png, tiff_le, tiff_be, bmp = b"\xff\xd8", b"\x89P", b"II", b"MM", b"BM"
-        return path.stat().st_size > 0 and path.read_bytes()[:2] not in (
-            jpeg, png, tiff_le, tiff_be, bmp,
-        )
-    except OSError:
-        return False
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ------------------------------------------------------------------ edits
@@ -262,10 +273,13 @@ def _straighten(img, degrees: float):
     height, width = img.shape[:2]
     center = (width // 2, height // 2)
     matrix = cv2.getRotationMatrix2D(center, degrees, 1.0)
-    # Zoom in enough that corners stay covered (cos/sin bound).
+    # Minimum cover zoom: the rotated image's bounding box is
+    # (W·cos + H·sin) × (W·sin + H·cos); each new dimension divided by its
+    # OWN original. The previously swapped denominators over-zoomed every
+    # non-square photo by up to ~40%.
     cos, sin = abs(matrix[0, 0]), abs(matrix[0, 1])
-    scale = max(1.0, (width * sin + height * cos) / width,
-                (width * cos + height * sin) / height)
+    scale = max(1.0, (width * cos + height * sin) / width,
+                (width * sin + height * cos) / height)
     matrix[0, 2] += (scale - 1.0) * width / 2
     matrix[1, 2] += (scale - 1.0) * height / 2
     return cv2.warpAffine(img, matrix, (width, height),

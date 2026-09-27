@@ -122,7 +122,7 @@ export default function SettingsPage() {
       </section>
 
       <section className="utility-card">
-        <h2>Locked folder</h2>
+        <h2>Hidden folder</h2>
         {lockSet === null ? (
           <p className="info-muted">…</p>
         ) : lockSet ? (
@@ -158,11 +158,11 @@ export default function SettingsPage() {
             className="btn-chip btn-danger-ghost"
             onClick={async () => {
               if (!libraryPath) return;
-              const code = await promptText({ title: 'Passcode to remove the locked folder:', placeholder: 'Current passcode' });
+              const code = await promptText({ title: 'Passcode to remove the hidden folder:', placeholder: 'Current passcode' });
               if (!code) return;
               try {
                 await backend.removeLockedPasscode(code);
-                showToast({ text: 'Passcode removed — locked items are visible again', kind: 'info' });
+                showToast({ text: 'Passcode removed — hidden items are visible again', kind: 'info' });
                 setLockSet(false);
                 refresh();
               } catch {

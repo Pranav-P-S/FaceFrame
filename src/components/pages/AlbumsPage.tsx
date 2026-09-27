@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { backend } from '../../lib/api';
 import { useStore } from '../../lib/store';
 import { promptText } from '../../lib/prompt';
@@ -10,7 +10,7 @@ import { useImage } from '../../images';
 export default function AlbumsPage() {
   const route = useStore((s) => s.route);
   if (route.page === 'albums' && route.albumId != null) {
-    return <AlbumDetail albumId={route.albumId} />;
+    return <AlbumDetail key={route.albumId} albumId={route.albumId} />;
   }
   return <AlbumList />;
 }
@@ -51,6 +51,7 @@ function AlbumCover({ hash }: { hash: string | null }) {
 
 function AlbumDetail({ albumId }: { albumId: number }) {
   const [album, setAlbum] = useState<AlbumDetail | null>(null);
+  const [missing, setMissing] = useState(false);
   const openViewer = useStore((s) => s.openViewer);
   const showToast = useStore((s) => s.showToast);
   const refresh = useStore((s) => s.refresh);
@@ -60,10 +61,26 @@ function AlbumDetail({ albumId }: { albumId: number }) {
   const [order, setOrder] = useState<Item[]>([]);
 
   const setAlbumsState = (res: Record<string, unknown>) => setAlbum((res.album as AlbumDetail) ?? null);
-  const reload = () => {
-    void backend.getAlbum(albumId).then(setAlbumsState);
-  };
-  useEffect(reload, [albumId]);
+  const reload = useCallback(() => {
+    // A stale id (deleted album, back-after-merge garbage history) must
+    // resolve to a not-found state, not a spinner forever.
+    void backend
+      .getAlbum(albumId)
+      .then(setAlbumsState)
+      .catch(() => setMissing(true));
+  }, [albumId]);
+  useEffect(reload, [reload]);
+
+  if (!Number.isFinite(albumId) || missing) {
+    return (
+      <div className="page">
+        <div className="empty-state">
+          <h2>Album not found</h2>
+          <p className="empty-hint"><a href="#/albums">← Back to albums</a></p>
+        </div>
+      </div>
+    );
+  }
 
   const hashesFromSelection = (): string[] =>
     [...selection]

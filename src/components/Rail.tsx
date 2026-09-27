@@ -29,7 +29,7 @@ export default function Rail() {
         <NavItem icon="⚙" label="Utilities" href="#/utilities" active={route.page === 'utilities'} />
         <NavItem icon="❐" label="Archive" href="#/archive" active={route.page === 'archive'} />
         <NavItem icon="🗑" label="Trash" href="#/trash" active={route.page === 'trash'} />
-        <NavItem icon="🔒" label="Locked" href="#/locked" active={route.page === 'locked'} />
+        <NavItem icon="🔒" label="Hidden" href="#/locked" active={route.page === 'locked'} />
       </div>
     </nav>
   );

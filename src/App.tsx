@@ -33,7 +33,9 @@ export default function App() {
   const setScan = useStore((s) => s.setScan);
   const libraryPath = useStore((s) => s.libraryPath);
   const setLibraryPath = useStore((s) => s.setLibraryPath);
-  const viewer = useStore((s) => s.viewer);
+  // Viewer is NOT subscribed here on purpose: it self-subscribes, so
+  // swiping between photos re-renders only the viewer, not this tree with
+  // the feed grid behind it.
 
   // Mock backend for plain-browser dev (also powers visual review).
   const mocked = installIfMissing();
@@ -164,7 +166,7 @@ export default function App() {
           <span>
             {backendStatus.state === 'unavailable'
               ? backendStatus.reason === 'python-not-found'
-                ? 'The photo engine could not start: Python was not found. Install Python 3.10+ and create the venv (see README).'
+                ? 'The photo engine could not start: Python was not found. In the project folder run "npm run setup" once (it creates the venv and installs the backend; see README).'
                 : `The photo engine stopped (${backendStatus.reason || 'unknown reason'}).`
               : 'The photo engine is starting…'}
           </span>
@@ -188,9 +190,7 @@ export default function App() {
         <main className={`content ${route.page === 'photos' ? 'content-grid' : ''}`}>{page}</main>
       </div>
 
-      {viewer && viewer.items[viewer.index] && (
-        <Viewer items={viewer.items} index={viewer.index} />
-      )}
+      <Viewer />
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
 

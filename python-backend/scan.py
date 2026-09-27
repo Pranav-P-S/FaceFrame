@@ -17,6 +17,7 @@ committed, so a crash mid-pass always self-heals on the next pass.
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pathio
@@ -29,6 +30,15 @@ DATA_DIR_NAME = ".faceframe"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv", ".3gp"}
 VALID_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS  # legacy name, kept for imports
+
+# Hashing is pure disk IO + sha256 (hashlib releases the GIL), so a small
+# pool keeps a few hashes ready while the main loop decodes and runs
+# inference on the previous file — the engine no longer sits idle behind a
+# read. Decoding/inference stay on the main loop thread on purpose: the
+# shared ONNX engines are constructed and consumed there (see D4), and the
+# per-file state machine below is far easier to keep correct single-threaded.
+HASH_WORKERS = 4
+HASH_AHEAD = 8
 
 
 class ScanPipeline:
@@ -64,6 +74,7 @@ class ScanPipeline:
             "videos": 0,
             "missing_now": 0,
             "gc_removed": 0,
+            "failed": 0,
             "cancelled": False,
         }
 
@@ -100,51 +111,82 @@ class ScanPipeline:
                 continue
             pending.append((abs_path, rel_path, stat))
 
-        # Hash + process with decode overlapped against hashing of the next
-        # candidates.
-        for abs_path, rel_path, stat in pending:
-            if self.abort_check():
-                return self._cancelled(stats)
-            try:
-                hash_hex = self._hash(abs_path, stats)
-            except OSError as e:
-                logger.warning("Cannot read %s: %s", abs_path, e)
-                continue
-            existing = known.get(rel_path)
-            if (
-                existing
-                and existing["content_hash"] == hash_hex
-                # Byte-identical AND fully analyzed: refresh the stat mirror
-                # only. A 'hashed' row (a previous pass without face models)
-                # must fall through to processing or it would never receive
-                # faces.
-                and existing["analysis_state"] == "analyzed"
-            ):
-                # Touched but byte-identical: refresh stat mirror only.
-                self.store.upsert_file(
-                    rel_path, hash_hex, stat.st_mtime, stat.st_size,
-                    kind=existing["kind"], added_at=existing["added_at"],
-                )
-                stats["content_unchanged"] += 1
-                continue
-            if existing and existing["content_hash"]:
-                # Edited in place: user state follows the item to its new
-                # content, and the orphaned old media row is GC'd.
-                self.store.migrate_media_state(existing["content_hash"], hash_hex)
-            media = self.store.get_media(hash_hex)
-            if media is not None and media["analysis_state"] == "analyzed":
-                # Same bytes, new path: the expensive work already exists.
-                self.store.upsert_file(
-                    rel_path, hash_hex, stat.st_mtime, stat.st_size,
-                    kind=media["kind"],
-                    added_at=existing["added_at"] if existing else None,
-                )
-                stats["dedup_hits"] += 1
+        # Hash ahead of the process loop: workers read+hash while the main
+        # loop decodes and infers the previous file. Stats and progress
+        # events are still produced in the main loop, in file order.
+        futures: dict[int, object] = {}
+        next_submit = 0
+
+        def submit_up_to(limit: int):
+            nonlocal next_submit
+            while next_submit < limit and next_submit < len(pending):
+                abs_p = pending[next_submit][0]
+                futures[next_submit] = hash_pool.submit(_hash_quiet, abs_p)
+                # Truthful progress: this file is hashing NOW. (The pop below
+                # fires the non-hashing event for the file being processed —
+                # the old ordering claimed "hashing" after it had finished.)
+                self._progress(stats, os.path.basename(abs_p), hashing=True)
+                next_submit += 1
+
+        hash_pool = ThreadPoolExecutor(max_workers=HASH_WORKERS)
+        try:
+            for i, (abs_path, rel_path, stat) in enumerate(pending):
+                if self.abort_check():
+                    return self._cancelled(stats)
+                submit_up_to(i + 1 + HASH_AHEAD)
+                try:
+                    hash_hex = futures.pop(i).result()
+                except OSError as e:
+                    logger.warning("Cannot read %s: %s", abs_path, e)
+                    continue
+                stats["hashed"] += 1
+                self._progress(stats, os.path.basename(abs_path))
+                existing = known.get(rel_path)
+                if (
+                    existing
+                    and existing["content_hash"] == hash_hex
+                    # Byte-identical AND fully analyzed: refresh the stat mirror
+                    # only. A 'hashed' row (a previous pass without face models)
+                    # must fall through to processing or it would never receive
+                    # faces.
+                    and existing["analysis_state"] == "analyzed"
+                ):
+                    # Touched but byte-identical: refresh stat mirror only.
+                    self.store.upsert_file(
+                        rel_path, hash_hex, stat.st_mtime, stat.st_size,
+                        kind=existing["kind"], added_at=existing["added_at"],
+                    )
+                    stats["content_unchanged"] += 1
+                    continue
+                if existing and existing["content_hash"]:
+                    # Edited in place: user state follows the item to its new
+                    # content, and the orphaned old media row is GC'd.
+                    self.store.migrate_media_state(existing["content_hash"], hash_hex)
+                media = self.store.get_media(hash_hex)
+                if media is not None and media["analysis_state"] == "analyzed":
+                    # Same bytes, new path: the expensive work already exists.
+                    self.store.upsert_file(
+                        rel_path, hash_hex, stat.st_mtime, stat.st_size,
+                        kind=media["kind"],
+                        added_at=existing["added_at"] if existing else None,
+                    )
+                    stats["dedup_hits"] += 1
+                    self._progress(stats, rel_path)
+                    continue
+                try:
+                    self._process(abs_path, rel_path, hash_hex, stat, stats,
+                                  added_at=existing["added_at"] if existing else None)
+                except Exception:
+                    # Backstop: one poison file must never abort the pass (a
+                    # NaN video property used to do exactly that). The file
+                    # stays unindexed and retries next pass.
+                    logger.exception("Processing failed for %s", abs_path)
+                    stats["failed"] += 1
                 self._progress(stats, rel_path)
-                continue
-            self._process(abs_path, rel_path, hash_hex, stat, stats,
-                          added_at=existing["added_at"] if existing else None)
-            self._progress(stats, rel_path)
+        finally:
+            # stragglers finish; queued-but-unstarted tasks are dropped so a
+            # cancelled scan does not keep hashing the rest of the library.
+            hash_pool.shutdown(wait=True, cancel_futures=True)
 
         if self.abort_check():
             return self._cancelled(stats)
@@ -184,15 +226,7 @@ class ScanPipeline:
         images.sort()
         return images
 
-    def _hash(self, abs_path: str, stats: dict) -> str:
-        from hashing import content_hash
-
-        stats["hashed"] += 1
-        self._progress(stats, os.path.basename(abs_path), hashing=True)
-        return content_hash(abs_path)
-
-    def _process(self, abs_path, rel_path, hash_hex, stat, stats,
-                 added_at=None):
+    def _process(self, abs_path, rel_path, hash_hex, stat, stats,                 added_at=None):
         suffix = Path(abs_path).suffix.lower()
         kind = "video" if suffix in VIDEO_EXTENSIONS else "photo"
         meta = {
@@ -229,6 +263,7 @@ class ScanPipeline:
                 # Transient (vanished mid-pass, IO contention, a cloud
                 # placeholder still materializing): retry on a later pass.
                 logger.warning("Undecodable, left for a later pass: %s", abs_path)
+                stats["failed"] += 1
                 return
             height, width = img.shape[:2]
             meta["width"], meta["height"] = int(width), int(height)
@@ -262,6 +297,7 @@ class ScanPipeline:
             video_meta = self._process_video(abs_path, hash_hex)
             if video_meta is None:
                 logger.warning("Unreadable video, left for a later pass: %s", abs_path)
+                stats["failed"] += 1
                 return
             meta.update(video_meta)
             stats["videos"] += 1
@@ -308,6 +344,8 @@ class ScanPipeline:
 
     def _process_video(self, abs_path: str, hash_hex: str):
         """Duration + dimensions + a poster frame; None when unreadable."""
+        import math
+
         import cv2
 
         capture = cv2.VideoCapture(abs_path)
@@ -315,17 +353,29 @@ class ScanPipeline:
             if not capture.isOpened():
                 logger.warning("Unreadable video, left for a later pass: %s", abs_path)
                 return None
-            fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
+            fps = capture.get(cv2.CAP_PROP_FPS)
             frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
-            width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            duration = frames / fps if frames and frames > 0 else None
+            width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            # Corrupt streams report NaN properties, which are truthy — the
+            # old `or 30.0` default missed them and int(nan) aborted the
+            # whole scan pass at this file, forever. Unreadable geometry
+            # means unreadable video.
+            if not (math.isfinite(width) and width > 0
+                    and math.isfinite(height) and height > 0):
+                logger.warning("Video reports no usable geometry, left for a later pass: %s", abs_path)
+                return None
+            if not math.isfinite(fps) or fps <= 0:
+                fps = 30.0
+            if not math.isfinite(frames) or frames < 0:
+                frames = 0
+            duration = frames / fps if frames > 0 else None
             poster_rel = self._save_poster(capture, hash_hex, frames, fps)
         finally:
             capture.release()
         return {
-            "width": width,
-            "height": height,
+            "width": int(width),
+            "height": int(height),
             "duration": duration,
             "poster_path": poster_rel,
         }
@@ -431,7 +481,8 @@ class ScanPipeline:
             processed=stats["skipped_unchanged"]
             + stats["content_unchanged"]
             + stats["dedup_hits"]
-            + stats["decoded"],
+            + stats["decoded"]
+            + stats["failed"],
             total=stats["files_total"],
             file=filename,
             hashing=hashing,
@@ -442,6 +493,14 @@ class ScanPipeline:
         stats["elapsed"] = None
         self.emit("scan_cancelled", **stats)
         return stats
+
+
+def _hash_quiet(abs_path: str) -> str:
+    """Pool worker: hash one file, no stats or events (the main loop owns
+    those, in file order). OSError propagates to the consumer."""
+    from hashing import content_hash
+
+    return content_hash(abs_path)
 
 
 def _preview_kept(name: str, known: set) -> bool:

@@ -2,7 +2,9 @@ const { app, BrowserWindow, ipcMain, dialog, net, protocol } = require('electron
 const path = require('path');
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
+const readline = require('readline');
 const fs = require('fs');
+const fsp = fs.promises;
 const { Readable } = require('stream');
 
 let mainWindow = null;
@@ -73,14 +75,25 @@ function registerAppProtocol() {
 // Media roots are ONLY the folders the user picked in the OS folder dialog
 // (plus their persisted history). open_library/scan with a raw renderer path
 // does not grant streaming rights — that call can name any directory.
+// Roots are stored normalized; rootsLower caches the lowercase forms so the
+// per-request containment check never rebuilds them.
 const mediaRoots = new Set();
+const mediaRootsLower = new Set();
 const mediaRootsFile = () =>
   path.join(app.getPath('userData'), 'media-roots.json');
+
+function cacheMediaRoot(root) {
+  const normalized = path.normalize(root);
+  mediaRoots.add(normalized);
+  const lower = normalized.toLowerCase();
+  mediaRootsLower.add(lower.endsWith(path.sep) ? lower : lower + path.sep);
+  return normalized;
+}
 
 function loadMediaRoots() {
   try {
     for (const root of JSON.parse(fs.readFileSync(mediaRootsFile(), 'utf8'))) {
-      mediaRoots.add(path.normalize(root));
+      cacheMediaRoot(root);
     }
   } catch {
     // first run / unreadable — start empty
@@ -88,12 +101,12 @@ function loadMediaRoots() {
 }
 
 function persistMediaRoots() {
-  try {
-    fs.mkdirSync(path.dirname(mediaRootsFile()), { recursive: true });
-    fs.writeFileSync(mediaRootsFile(), JSON.stringify([...mediaRoots], null, 1));
-  } catch (e) {
-    console.error('could not persist media roots:', e);
-  }
+  // Async on purpose: this runs on the main process; callers only need the
+  // in-memory set to be current.
+  fsp
+    .mkdir(path.dirname(mediaRootsFile()), { recursive: true })
+    .then(() => fsp.writeFile(mediaRootsFile(), JSON.stringify([...mediaRoots], null, 1)))
+    .catch((e) => console.error('could not persist media roots:', e));
 }
 
 // Only real media files are ever streamed — a compromised renderer must not
@@ -118,7 +131,9 @@ const MEDIA_MIME = {
 };
 
 function registerMediaProtocol() {
-  protocol.handle(MEDIA_SCHEME, (request) => {
+  // Async handler: stat/promises keep disk latency (noticeable on network
+  // libraries and spinning disks) off Electron's main process.
+  protocol.handle(MEDIA_SCHEME, async (request) => {
     try {
       const url = new URL(request.url);
       // searchParams.get already percent-decodes; a second decode would
@@ -126,19 +141,24 @@ function registerMediaProtocol() {
       const requested = path.normalize(url.searchParams.get('path') || '');
       const lower = requested.toLowerCase();
       // Separator-safe containment (a root must not admit prefix siblings)
-      // and our metadata folder is never streamed.
-      const underRoot = [...mediaRoots].some((root) => {
-        const r = path.normalize(root);
-        const rl = r.toLowerCase();
-        return requested === r || lower.startsWith(rl.endsWith(path.sep) ? rl : rl + path.sep);
-      });
+      // and our metadata folder is never streamed. Roots are pre-normalized
+      // in cacheMediaRoot — no per-request normalize/lowercase work.
+      const withSep = lower.endsWith(path.sep) ? lower : lower + path.sep;
+      const underRoot =
+        mediaRootsLower.has(withSep) ||
+        [...mediaRootsLower].some((rl) => lower.startsWith(rl));
       const allowed =
         underRoot && !lower.includes('.faceframe') && MEDIA_MIME[path.extname(lower)];
       if (!allowed) {
         return new Response('Forbidden', { status: 403 });
       }
       const mime = MEDIA_MIME[path.extname(lower)];
-      const stat = fs.statSync(requested);
+      let stat;
+      try {
+        stat = await fsp.stat(requested);
+      } catch {
+        return new Response('Not found', { status: 404 });
+      }
       const range = request.headers.Range || request.headers.range;
       if (range) {
         const match = /bytes=(\d*)-(\d*)/.exec(range);
@@ -188,7 +208,7 @@ function registerMediaProtocol() {
 
 function addMediaRoot(folder) {
   if (folder) {
-    mediaRoots.add(path.normalize(folder));
+    cacheMediaRoot(folder);
     persistMediaRoots();
   }
 }
@@ -232,14 +252,14 @@ function candidatePythonPaths() {
 }
 
 function probePython(candidate) {
-  // A bare file path that exists wins immediately (venv layouts).
+  // A bare file path that exists wins immediately (venv layouts). Async so
+  // nothing here touches the main thread synchronously.
   if (candidate.includes('/') || candidate.includes('\\')) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return Promise.resolve(candidate);
-    } catch {
-      return Promise.reject(new Error('not found'));
-    }
+    return fsp
+      .access(candidate, fs.constants.X_OK)
+      .then(() => candidate, () => {
+        throw new Error('not found');
+      });
   }
   // Bare command name (system python): verify it actually runs and has the
   // dependencies. On Windows the Store alias stub exists on PATH but is
@@ -286,6 +306,8 @@ function killPython() {
       // has to go.
       spawn('taskkill', ['/pid', String(pythonProcess.pid), '/T', '/F'], {
         stdio: 'ignore',
+      }).on('error', () => {
+        // taskkill missing from PATH must not crash main during quit.
       });
     } else {
       pythonProcess.kill('SIGTERM');
@@ -338,25 +360,27 @@ function startPythonBackend() {
       pythonProcess.stdout.on('error', () => {});
       pythonProcess.stderr.on('error', () => {});
 
-      // NDJSON over a pipe: chunk boundaries can split a multi-byte UTF-8
-      // sequence, so accumulate Buffers and only decode complete lines.
-      let stdoutBuffer = Buffer.alloc(0);
-      pythonProcess.stdout.on('data', (chunk) => {
-        stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
-        let newlineIndex;
-        while ((newlineIndex = stdoutBuffer.indexOf(0x0a)) !== -1) {
-          const line = stdoutBuffer.subarray(0, newlineIndex).toString('utf8').trim();
-          stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
-          if (line) handleBackendLine(line);
-        }
+      // NDJSON over a pipe. readline owns the buffering: no per-chunk
+      // Buffer.concat (quadratic copying on multi-MB scan/feed responses),
+      // and its StringDecoder keeps multi-byte UTF-8 intact across chunk
+      // boundaries. crlfDelay swallows a \r split from its \n.
+      const stdoutLines = readline.createInterface({
+        input: pythonProcess.stdout,
+        crlfDelay: Infinity,
+      });
+      stdoutLines.on('line', (line) => {
+        const trimmed = line.trim();
+        if (trimmed) handleBackendLine(trimmed);
       });
 
       pythonProcess.stderr.on('data', (chunk) => {
         console.error(`[backend] ${chunk.toString().trimEnd()}`);
       });
 
-      pythonProcess.on('exit', (code) => {
-        const crashed = backendReady || code !== 0;
+      const onBackendGone = (crashed, why) => {
+        // 'error' and 'exit' can both fire for one process; the guard makes
+        // the handler idempotent.
+        if (!pythonProcess) return;
         pythonProcess = null;
         backendReady = false;
         for (const { reject, timer } of pendingRequests.values()) {
@@ -364,6 +388,7 @@ function startPythonBackend() {
           reject(new Error('Backend stopped'));
         }
         pendingRequests.clear();
+        if (why) console.error(`[backend] gone (${why})`);
         if (!appQuitting) {
           if (crashed && consecutiveCrashes < 3) {
             consecutiveCrashes += 1;
@@ -383,6 +408,16 @@ function startPythonBackend() {
             broadcast('backend-status', lastBackendStatus);
           }
         }
+      };
+      pythonProcess.on('exit', (code) => {
+        onBackendGone(backendReady || code !== 0, null);
+      });
+      // A spawn failure (AV quarantine, wrong architecture, EACCES) emits
+      // 'error' with NO 'exit'. Without this listener the exception escapes
+      // and kills the Electron main process; the supervisor would also wedge
+      // because pythonProcess never clears.
+      pythonProcess.on('error', (err) => {
+        onBackendGone(true, err.message);
       });
 
       waitForBackend();
@@ -467,7 +502,7 @@ function requireBackend() {
   if (!backendReady) {
     const reasonText = {
       'python-not-found':
-        'Python was not found. Install Python 3.10+ and create the venv (see README).',
+        'Python was not found. In the project folder run "npm run setup" once (it creates the venv and installs the backend; see README).',
       'backend-repeated-crash':
         'The Python backend crashed repeatedly and has stopped. Use "Try again" on the banner to restart it.',
       'backend-timeout':

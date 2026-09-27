@@ -9,6 +9,7 @@ labels, watcher) and plugs in here.
 
 import base64
 import json
+import os
 import sqlite3
 import logging
 import shutil
@@ -203,6 +204,7 @@ def get_shared_labeler():
 
 def run_scan(path, provider):
     global _scan_thread
+    pipeline = None
     try:
         ctx = locate_library(path)
         root = ctx["root"]
@@ -246,6 +248,21 @@ def run_scan(path, provider):
         logger.exception("Scan failed")
         emit({"event": "scan_error", "message": str(e)})
     finally:
+        # The pipeline owns a pooled Store connection; release it here or the
+        # handle outlives this thread and blocks clear_index/restore from
+        # replacing the index file on Windows.
+        if pipeline is not None:
+            try:
+                pipeline.store.close_all()
+            except Exception:
+                logger.exception("Could not close the scan pipeline store")
+        # The scan thread also touched ctx["store"] (trash purge, labeler
+        # setup); release this thread's pooled handle so the library carries
+        # no open handle once the job is done.
+        try:
+            ctx["store"].release_thread_conn()
+        except Exception:
+            pass
         with _lifecycle_lock:
             _scan_thread = None
 
@@ -608,7 +625,14 @@ def _get_albums(req):
     ctx = locate_library(req["path"])
     albums = []
     for a in ctx["library"].list_albums():
-        a["cover"] = _abs(ctx, _cover_rel(ctx, a.get("cover_hash")))
+        cover_rel = _cover_rel(ctx, a.get("cover_hash"))
+        if cover_rel is None:
+            # The chosen cover is gone (trashed / deleted / missing), or no
+            # cover was ever picked: serve the album's first live item
+            # instead of a dead gray tile. cover_hash itself stays untouched
+            # — restoring the original photo brings the user's choice back.
+            cover_rel = _first_live_album_item_rel(ctx, a["id"])
+        a["cover"] = _abs(ctx, cover_rel)
         albums.append(a)
     return {"albums": albums}
 
@@ -622,6 +646,18 @@ def _cover_rel(ctx, content_hash):
                WHERE content_hash=? AND missing=0 AND trashed_at IS NULL
                ORDER BY path LIMIT 1""",
             (content_hash,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def _first_live_album_item_rel(ctx, album_id):
+    with ctx["store"].connect() as conn:
+        row = conn.execute(
+            """SELECT f.path FROM album_items ai
+               JOIN files f ON f.content_hash = ai.content_hash
+               WHERE ai.album_id=? AND f.missing=0 AND f.trashed_at IS NULL
+               ORDER BY ai.position, ai.added_at, f.path LIMIT 1""",
+            (album_id,),
         ).fetchone()
     return row[0] if row else None
 
@@ -723,7 +759,12 @@ def _get_album(req):
         except ValueError:
             item["flags"] = {}
         items.append(item)
-    meta["cover"] = _abs(ctx, _cover_rel(ctx, meta.get("cover_hash")))
+    cover_rel = _cover_rel(ctx, meta.get("cover_hash"))
+    if cover_rel is None:
+        # Same fallback as get_albums: a dead cover shows the first live
+        # item rather than a gray tile.
+        cover_rel = _first_live_album_item_rel(ctx, meta["id"])
+    meta["cover"] = _abs(ctx, cover_rel)
     meta["items"] = items
     return {"album": meta}
 
@@ -864,11 +905,11 @@ def _set_person_thumbnail(req):
     ctx = locate_library(req["path"])
     thumb = req["thumbnail"]
     # The renderer only knows absolute paths; store the library-relative form
-    # so the library stays movable.
-    if os.path.isabs(thumb):
-        resolved = ctx["library"]._contained(thumb)
-        thumb = pathio.to_relative(str(resolved), ctx["root"])
-    ctx["people"].set_person_thumbnail(req["person_id"], thumb.replace("\\", "/"))
+    # so the library stays movable. _contained resolves either form and
+    # refuses anything outside the library (a relative ".." escape included).
+    resolved = ctx["library"]._contained(thumb)
+    thumb = pathio.to_relative(str(resolved), ctx["root"]).replace("\\", "/")
+    ctx["people"].set_person_thumbnail(req["person_id"], thumb)
     return {}
 
 
@@ -1169,33 +1210,41 @@ def _restore_index(req):
     src = Path(req.get("src") or "")
     if not src.is_file():
         raise ValueError("Backup file not found")
-    if busy_worker():
-        raise RuntimeError("Another operation is still running")
     data_dir = Path(ctx["root"]) / DATA_DIR_NAME
     data_dir.mkdir(parents=True, exist_ok=True)
     data_dir_resolved = data_dir.resolve()
-    with zipfile.ZipFile(src) as zf:
-        names = zf.namelist()
-        if "index.db" not in names:
-            raise ValueError("Not a FaceFrame index backup")
-        # Replace, don't merge: the backup is a full index snapshot.
-        for rel in ("index.db", "index.db-wal", "index.db-shm"):
-            target = data_dir / rel
-            if target.exists():
-                target.unlink()
-        zf.extract("index.db", data_dir)
-        for name in names:
-            if name.startswith("thumbnails/"):
-                # Manual extraction gets no zipfile sanitization: refuse any
-                # member that would land outside the data dir (zip-slip).
-                out = (data_dir / name).resolve()
-                if not out.is_relative_to(data_dir_resolved):
-                    logger.warning("Backup member escapes the library, skipped: %s", name)
-                    continue
-                out.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as fsrc, open(out, "wb") as fdst:
-                    fdst.write(fsrc.read())
-    _contexts.pop(ctx["root"], None)
+    # Check + close + swap + context-drop must be atomic with respect to job
+    # starts: a scan acquiring the lock in the gap would write into the
+    # orphaned old index file while new connections get the extracted one.
+    with _lifecycle_lock:
+        if busy_worker():
+            raise RuntimeError("Another operation is still running")
+        # The pooled connections hold the index file open; on Windows the
+        # unlinks below would fail (or, worse, silently no-op) while a
+        # handle exists.
+        ctx["store"].close_all()
+        with zipfile.ZipFile(src) as zf:
+            names = zf.namelist()
+            if "index.db" not in names:
+                raise ValueError("Not a FaceFrame index backup")
+            # Replace, don't merge: the backup is a full index snapshot.
+            for rel in ("index.db", "index.db-wal", "index.db-shm"):
+                target = data_dir / rel
+                if target.exists():
+                    target.unlink()
+            zf.extract("index.db", data_dir)
+            for name in names:
+                if name.startswith("thumbnails/"):
+                    # Manual extraction gets no zipfile sanitization: refuse any
+                    # member that would land outside the data dir (zip-slip).
+                    out = (data_dir / name).resolve()
+                    if not out.is_relative_to(data_dir_resolved):
+                        logger.warning("Backup member escapes the library, skipped: %s", name)
+                        continue
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as fsrc, open(out, "wb") as fdst:
+                        fdst.write(fsrc.read())
+        _contexts.pop(ctx["root"], None)
     emit({"event": "index_restored", "path": ctx["root"]})
     return {"restored": True}
 
@@ -1236,6 +1285,13 @@ def _export_items(req):
     dest = req.get("dest")
     if not dest:
         raise ValueError("Missing dest")
+    dest_path = Path(dest).resolve()
+    root_resolved = Path(ctx["root"]).resolve()
+    # Exports must land OUTSIDE the library: inside, they would re-enter the
+    # index on the next scan (self-import) and the overwrite guard would be
+    # reasoning about its own input.
+    if dest_path == root_resolved or root_resolved in dest_path.parents:
+        raise ValueError("Export destination is inside the library")
     Path(dest).mkdir(parents=True, exist_ok=True)
     exported = 0
     errors = []
@@ -1343,6 +1399,7 @@ def _watch_pass():
             if (ctx["store"].get_meta("setting_watch", "0") != "1"):
                 continue
             try:
+                pipeline = None
                 processor = get_shared_processor("auto")
                 processor.thumbnail_dir = str(Path(ctx["root"]) / DATA_DIR_NAME / "thumbnails")
                 pipeline = ScanPipeline(
@@ -1359,6 +1416,20 @@ def _watch_pass():
                 # scan.py emits scan_complete / scan_cancelled itself.
             except Exception:
                 logger.exception("Watch pass failed for %s", ctx["root"])
+            finally:
+                # Same reason as run_scan: release the pooled handles now,
+                # not whenever GC gets around to it. The watcher thread is
+                # long-lived, so its ctx-store connection would otherwise
+                # hold the library locked at rest forever.
+                if pipeline is not None:
+                    try:
+                        pipeline.store.close_all()
+                    except Exception:
+                        logger.exception("Could not close the watch pipeline store")
+                try:
+                    ctx["store"].release_thread_conn()
+                except Exception:
+                    pass
     finally:
         with _lifecycle_lock:
             _scan_thread = None
@@ -1413,6 +1484,11 @@ def _clear_index(req):
     with _lifecycle_lock:
         if busy_worker():
             raise RuntimeError("Another operation is still running")
+        # Close pooled handles first: rmtree(ignore_errors=True) would
+        # silently leave a locked index.db in place on Windows.
+        ctx = _contexts.get(str(Path(path).resolve()))
+        if ctx is not None:
+            ctx["store"].close_all()
         if data_dir.exists():
             shutil.rmtree(data_dir, ignore_errors=True)
         _contexts.pop(str(Path(path).resolve()), None)
@@ -1498,11 +1574,26 @@ def main():
         except json.JSONDecodeError:
             logger.warning("Ignoring malformed request line")
             continue
+        if not isinstance(req, dict):
+            # A bare list/string/null would escape via the recovery
+            # reply(req.get(...)) and kill the loop; answer and move on.
+            reply(None, False, error="Malformed request: expected an object")
+            continue
         try:
             handle(req)
         except Exception as e:
             logger.exception("Command failed")
             reply(req.get("id"), False, error=str(e))
+        finally:
+            # Between requests the library must carry no open handle: users
+            # rename/move their photo folders in Explorer, and Windows blocks
+            # that while a pooled connection idles on index.db. Bursty
+            # workers (scan/cluster/watch) keep their connection for the
+            # whole job; the command thread releases after every request.
+            with _contexts_lock:
+                stores = [ctx["store"] for ctx in _contexts.values()]
+            for store in stores:
+                store.release_thread_conn()
     logger.info("Backend stopped")
 
 

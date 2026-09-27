@@ -2,11 +2,11 @@
 
 A fully local photo manager with the Google Photos experience — an infinite
 day-grouped feed, search across people, places and things, albums, memories,
-a non-destructive editor, videos, favorites, archive, trash and a locked
-folder. No account, no backup, no uploads: your photos never leave this
-machine, and the entire index lives in a hidden `.faceframe` folder inside
-the library you choose. Delete that folder and every trace of FaceFrame is
-gone.
+a non-destructive editor, videos, favorites, archive, trash and a
+passcode-gated hidden folder. No account, no backup, no uploads: your photos
+never leave this machine, and the entire index lives in a hidden `.faceframe`
+folder inside the library you choose. Delete that folder and every trace of
+FaceFrame is gone.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
@@ -35,7 +35,7 @@ gone.
   rate-limited), "on this day", trips and highlights builders.
 - **Library care** — albums (cover, sort, reorder), trash with 60-day
   retention that ends in the OS Recycle Bin (never a hard delete), archive,
-  a passcode-gated locked folder, exact-duplicate review, missing-file
+  a passcode-gated hidden folder, exact-duplicate review, missing-file
   tracking, storage stats and cache cleanup.
 - **Watch mode** (optional) — rescans while running so new photos appear
   automatically.
@@ -60,7 +60,18 @@ git clone https://github.com/Pranav-P-S/FaceFrame.git
 cd FaceFrame
 
 npm install
+npm run setup    # one-time: creates ./venv and installs the Python backend
 
+npm run electron:dev
+```
+
+`npm run setup` is a plain Node script: it finds a Python 3.10–3.13 on your
+PATH (warns outside 3.10–3.12, where prebuilt insightface wheels exist),
+creates the `venv`, and pip-installs `python-backend/requirements.txt`. It is
+idempotent — rerun it after pulling dependency changes. Doing those two steps
+by hand works too:
+
+```bash
 python -m venv venv
 # Windows:
 venv\Scripts\pip install -r python-backend\requirements.txt
@@ -108,7 +119,7 @@ npm run test:py
 npm test
 
 # v3 acceptance suite: idempotent rescans, zero-cost moves, duplicates,
-# albums, trash, locked folder, edits — the feature contract
+# albums, trash, hidden folder, edits — the feature contract
 npm run test:e2e:v3
 
 # frontend units (justified layout, query parser, routing, formatting)
@@ -137,7 +148,7 @@ python-backend/      Local photo service (stdin/stdout JSON protocol)
   labels.py          optional MobileNet "things" labels
   processor.py       InsightFace wrapper (detection + recognition)
   people.py          DBSCAN clustering, split/merge/assign/hide
-  library.py         favorites, archive, trash + 60-day purge, locked folder
+  library.py         favorites, archive, trash + 60-day purge, hidden folder
   views.py           feed + search execution, item detail
   query.py           search query parser
   places.py          geohash clustering, optional reverse geocoding
@@ -176,11 +187,14 @@ docs/                feature analysis, architecture critique, spec
 
 - No RAW decoding, no video trimming/re-encoding, no auto-movies, no cloud
   anything (backup, sharing links, comments) — the app is local by design.
-- The locked folder hides items from FaceFrame's views behind a passcode; it
+- The hidden folder hides items from FaceFrame's views behind a passcode; it
   does not encrypt files on disk and is not a backend security boundary (the
   UI says so — treat it as anti-shoulder-surfing). `.faceframe` also stores
   face embeddings and crops in plaintext; deleting a library removes them.
-- Pets are not detected (the face model is human-only). "Things" labels come
+- There is no per-pet grouping (the face model is human-only), but pets are
+  searchable as things: the labeler tags breed-level class names, and a
+  search for `dog`, `cat` (also `puppy`/`kitten`, plural forms) expands at
+  query time to those breed names — no rescan needed. "Things" labels come
   from an ImageNet classifier — broad categories, not fine-grained scenes.
 - Very small faces (under ~28 px) are skipped by the detector; abstract
   wallpapers can produce confident false positives.

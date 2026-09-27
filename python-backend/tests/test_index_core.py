@@ -262,3 +262,103 @@ def test_migration_is_idempotent(tmp_path, lib):
     count1 = s1.media_count()
     s2 = Store(str(old_path), library_root=str(root))
     assert s2.media_count() == count1
+
+
+# ---------------------------------------------------------------------------
+# connection pool (thread-local reuse, reaping, close_all)
+# ---------------------------------------------------------------------------
+
+def test_pool_reuses_connection_within_thread(db):
+    db.media_count()
+    conn1 = db._thread_conn()
+    conn2 = db._thread_conn()
+    assert conn1 is conn2
+    # A different Store on the same file keeps its own connection.
+    from store import Store
+
+    other = Store(db.db_path)
+    assert other._thread_conn() is not conn1
+
+
+def test_pool_reaps_dead_job_threads(db):
+    import threading
+
+    done = threading.Event()
+
+    def job():
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('pooltest', '1')"
+            )
+        done.set()
+
+    t = threading.Thread(target=job, daemon=True)
+    t.start()
+    assert done.wait(5)
+    t.join(5)
+    # Nothing reaped yet (reaping happens lazily on the next connect).
+    assert [(c, th) for c, th in db._pooled if th is t]
+    db.media_count()  # triggers the reap
+    assert not [1 for _, th in db._pooled if th is t]
+    assert db.get_meta("pooltest") == "1"
+
+
+def test_close_all_swaps_database_file(db, tmp_path):
+    """restore_index swaps index.db under a live Store object; the pool must
+    rebuild cleanly instead of serving stale pages (or tripping over the old
+    -wal file, which restore_index unlinks before extracting)."""
+    import shutil
+    from pathlib import Path
+
+    db.set_meta("before", "1")
+    db.close_all()
+    # Build a replacement index, checkpointed and handle-free, like the
+    # backup zip the real restore extracts.
+    replacement = tmp_path / "replacement.db"
+    from store import Store
+
+    repl_store = Store(str(replacement))
+    with repl_store.connect() as conn:
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('restored', '1')"
+        )
+    repl_store.close_all()
+    # Same three unlinks restore_index performs.
+    for suffix in ("-wal", "-shm"):
+        Path(str(db.db_path) + suffix).unlink(missing_ok=True)
+    shutil.copyfile(replacement, db.db_path)
+    # The same Store object must keep working against the new bytes.
+    assert db.get_meta("restored") == "1"
+    assert db.get_meta("before") is None
+
+
+def test_sort_time_follows_writers(tmp_path, lib):
+    """The materialized feed sort key must track EXIF dates, date overrides
+    and in-place edits, or the feed order silently lies."""
+    from store import Store
+    from views import feed_groups
+
+    root = lib(n=1, sub=False)
+    from scan import ScanPipeline
+
+    pipeline = ScanPipeline(str(root / ".faceframe" / "index.db"), str(root))
+    pipeline.run()
+    store = pipeline.store
+    with store.connect() as conn:
+        h = conn.execute("SELECT content_hash FROM media").fetchone()[0]
+
+    def first_item():
+        return feed_groups(store, "days")[0]["items"][0]["path"]
+
+    assert "photo_00" in first_item()
+    store.set_media_user_state(h, date_override=4000000000.0)
+    assert "photo_00" in first_item()
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT sort_time FROM files"
+        ).fetchone()
+        assert row[0] == 4000000000.0
+    store.set_media_user_state(h, date_override=None)
+    with store.connect() as conn:
+        row = conn.execute("SELECT sort_time FROM files").fetchone()
+        assert row[0] is not None and row[0] != 4000000000.0

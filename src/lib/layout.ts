@@ -48,7 +48,9 @@ export function justifyRows(
     const row: Row = { items: [], height, y };
     let x = 0;
     for (const index of current) {
-      const width = height * aspectOf(index);
+      // Same clamp as the accumulation loop above — an unclamped wide item
+      // (panorama) would push the row past the container edge.
+      const width = height * Math.min(3, Math.max(0.45, aspectOf(index) || 1.5));
       row.items.push({ index, x, y, width, height });
       x += width + gap;
     }

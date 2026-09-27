@@ -234,11 +234,12 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
       </button>
       <button
         className="btn-ghost"
+        title="Hide from all views behind the passcode-gated Hidden folder"
         onClick={async () => {
           const hs = await hashes();
           try {
             await backend.setLocked(hs, true);
-            showToast({ text: 'Locked — hidden until unlocked', kind: 'info' });
+            showToast({ text: 'Hidden — unlock the folder to see them again', kind: 'info' });
             refresh();
           } catch {
             showToast({ text: 'Set a passcode in Settings first', kind: 'error' });
@@ -246,7 +247,7 @@ function SelectionBar({ count, onDone }: { count: number; onDone: () => void }) 
           onDone();
         }}
       >
-        Lock
+        Hide
       </button>
       {count >= 2 && (
         <button

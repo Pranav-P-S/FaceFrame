@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Item } from '../types';
 import { justifyRows, visibleRows } from '../lib/layout';
 import { groupLabel, monthKey, yearKey } from '../lib/format';
@@ -21,12 +21,22 @@ const DENSITY_TARGET = [340, 260, 190, 130];
  * albums/search results via flatten. */
 export default function PhotoGrid({ groups, view, onOpen, flatten = false }: PhotoGridProps) {
   const density = useStore((s) => s.density);
-  const selection = useStore((s) => s.selection);
+  // Primitive selectors only: the selection Set is replaced on every
+  // toggle, so subscribing to it here would re-render the whole grid on
+  // each click. Tiles subscribe per-path (see Thumb); the grid only needs
+  // to know whether select-mode chrome is active.
+  const selectionNonEmpty = useStore((s) => s.selection.size > 0);
   const toggleSelect = useStore((s) => s.toggleSelect);
   const selectRange = useStore((s) => s.selectRange);
   const route = useStore((s) => s.route);
   const selectAll = useStore((s) => s.selectAll);
-  const selectMode = route.page !== 'photos' || selection.size > 0;
+  // Force select-mode only where opening is a no-op (the trash and hidden
+  // grids). Everywhere else a plain click opens the viewer — the old
+  // route-forced select mode made search/album/person/archive grids unable
+  // to open photos at all; selection there works via shift-click, and once
+  // a selection exists clicks toggle again.
+  const selectMode =
+    selectionNonEmpty || route.page === 'trash' || route.page === 'locked';
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1200);
@@ -132,6 +142,21 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
     rememberHashes(flatItems.map((i) => [i.path, i.content_hash] as [string, string]));
   }, [flatItems]);
 
+  // Stable per-index handlers: with memoized tiles, a scroll (new scrollTop)
+  // re-renders the row scaffolding but skips every already-mounted Thumb,
+  // and a selection click re-renders only the tiles whose membership flips.
+  const onOpenAt = useCallback(
+    (idx: number) => onOpen(flatItems, idx),
+    [onOpen, flatItems]
+  );
+  const onSelectAt = useCallback(
+    (idx: number, path: string, hash: string | undefined, shift: boolean) => {
+      if (shift && idx >= 0) selectRange(flatPaths, path);
+      else toggleSelect(path, hash);
+    },
+    [selectRange, toggleSelect, flatPaths]
+  );
+
   // Ctrl+A selects the whole flattened view (GP parity).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -168,14 +193,10 @@ export default function PhotoGrid({ groups, view, onOpen, flatten = false }: Pho
                     <Thumb
                       item={item}
                       height={row.height}
-                      selected={selection.has(item.path)}
                       selectMode={selectMode}
-                      onOpen={() => onOpen(flatItems, flatIndex)}
-                      onSelect={(shift) =>
-                        shift && flatIndex >= 0
-                          ? selectRange(flatPaths, item.path)
-                          : toggleSelect(item.path, item.content_hash)
-                      }
+                      flatIndex={flatIndex}
+                      onOpenAt={onOpenAt}
+                      onSelectAt={onSelectAt}
                     />
                   </div>
                 );

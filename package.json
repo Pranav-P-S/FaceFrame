@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"wait-on http://localhost:1420 && cross-env ELECTRON_START_URL=http://localhost:1420 electron electron/main.cjs\"",
     "electron:build": "npm run build && electron-builder",
+    "setup": "node scripts/setup-backend.mjs",
     "test": "node scripts/run-backend-e2e.mjs",
     "test:e2e": "node scripts/run-backend-e2e.mjs",
     "test:unit": "vitest run",
